@@ -3194,9 +3194,12 @@ contains
     real(dp), dimension(term_end,term_end) :: d_basis_i
     real(dp), dimension(term_end,term_end) :: d_basis_j
     integer :: q, l, m
-    real(dp), dimension(this%basis%n_dim) :: dij
+    ! real(dp), dimension(this%basis%n_dim) :: dij
+    ! real(dp), dimension(this%basis%n_dim) :: dij
+    real(dp), allocatable, dimension(:) :: dij
     real(dp) :: xdij_mag
 
+    allocate(dij(this%basis%n_dim))
     A = zero; B = zero; C = zero; D = zero
     dij = abs( this%basis%x_ref - nbor%basis%x_ref )
     do q = 1,fquad%n_quad
@@ -3223,6 +3226,7 @@ contains
     B = B * xdij_mag
     C = C * xdij_mag
     D = D * xdij_mag
+    deallocate(dij)
   end subroutine get_nbor_contribution
 
   pure function get_self_RHS_contribution( this, term_start, term_end, n_var, var_idx ) result(b)
@@ -3253,6 +3257,8 @@ contains
       b(:,v) = matmul( this%C(1:m,1:n,nbor_id), nbor%coefs(1:n,var_idx(v)) )
     end do
   end function get_nbor_RHS_contribution
+
+
 
 end module var_rec_cell_derived_type
 
@@ -3312,11 +3318,19 @@ contains
   end subroutine destroy_var_rec_block_t
 
   function constructor( grid, block_num, n_dim, degree, n_var ) result(this)
-    use grid_derived_type, only : grid_type
+    
+    use math,              only : maximal_extents
+    use index_conversion,  only : cell_face_nbors, global2local_bnd
+    use grid_derived_type, only : grid_type, pack_cell_node_coords
+    implicit none
     type(grid_type),   intent(in) :: grid
     integer,           intent(in) :: block_num, n_dim, degree, n_var
     type(var_rec_block_t)         :: this
-    integer :: n
+    integer,  dimension(3)     :: idx_tmp, lo, hi1, hi2
+    real(dp), dimension(3,8)   :: nodes
+    real(dp), dimension(n_dim) :: h_ref
+    integer,  dimension(2*n_dim) :: nbor_block, nbor_cell_idx, nbor_face_id
+    integer :: n, n_interior
 
     call this%destroy()
     allocate( this%n_cells( n_dim ) )
@@ -3329,8 +3343,15 @@ contains
     this%monomial_basis = monomial_basis_t( this%degree, this%n_dim )
     allocate( this%cells(this%n_cells_total) )
 
+    lo = [1,1,1]; hi1 = grid%gblock(block_num)%n_cells; hi2 = grid%gblock(block_num)%n_nodes
+    idx_tmp = 1
     do n = 1,this%n_cells_total
-      this%cells(n) = constructor_helper( grid, this%monomial_basis, n_dim, block_num, n, n_var )
+      idx_tmp(1:n_dim) = global2local_bnd( n, lo(1:n_dim), hi1(1:n_dim) )
+      call cell_face_nbors( n_dim, n, lo(1:n_dim), hi1(1:n_dim), nbor_cell_idx, nbor_face_id, n_interior )
+      nbor_block = block_num
+      nodes = pack_cell_node_coords( idx_tmp, lo, hi2, grid%gblock(block_num)%node_coords )
+      h_ref = maximal_extents( n_dim, 8, nodes(1:n_dim,:) )
+      this%cells(n) = var_rec_cell_t( n_dim, block_num, n, nbor_block, nbor_cell_idx, nbor_face_id, n_interior, n_var, this%monomial_basis, grid%gblock(block_num)%grid_vars%quad( idx_tmp(1), idx_tmp(2), idx_tmp(3) ), h_ref )
     end do
   end function constructor
 
@@ -3362,6 +3383,53 @@ contains
     end associate
   end function constructor_helper
 
+  ! subroutine get_cell_LHS( this, grid, lin_idx, term_start, term_end )
+  !   use set_constants,           only : zero
+  !   use index_conversion,        only : get_face_idx_from_id, global2local_bnd
+  !   use math,                    only : LUdecomp
+  !   use grid_derived_type,       only : grid_type
+  !   use quadrature_derived_type, only : quad_t
+  !   use var_rec_cell_derived_type, only : var_rec_cell_t
+  !   class(var_rec_block_t), target, intent(inout) :: this
+  !   type(grid_type),        target, intent(in)    :: grid
+  !   integer,                        intent(in)    :: lin_idx, term_start, term_end
+  !   real(dp), dimension(term_end - term_start, term_end - term_start ) :: dA
+  !   real(dp), dimension(term_end - term_start,            term_start ) :: dD
+  !   integer, dimension(3) :: lo, hi, idx, face_idx
+  !   integer :: i, j, jj, m, n, dir, n_interior
+  !   ! type(var_rec_cell_t), pointer :: nbor => null()
+  !   m = term_end - term_start
+  !   n = term_start
+  !   i = lin_idx
+  !   lo = [1,1,1]; hi = grid%gblock(this%block_num)%n_cells
+  !   idx = 1; idx(1:this%n_dim) = global2local_bnd(i,lo,hi)
+  !   n_interior = this%cells(lin_idx)%n_interior
+
+  !   this%cells(i)%A = zero
+  !   this%cells(i)%B = zero
+  !   this%cells(i)%C = zero
+  !   this%cells(i)%D = zero
+  !   this%cells(i)%LU = zero
+  !   this%cells(i)%P  = zero
+  !   associate( A  => this%cells(i)%A,  &
+  !              B  => this%cells(i)%B,  &
+  !              C  => this%cells(i)%C,  &
+  !              D  => this%cells(i)%D,  &
+  !              LU => this%cells(i)%LU, &
+  !              P  => this%cells(i)%P )
+  !     do jj = 1,n_interior
+  !       j = this%cells(i)%nbor_idx(jj)
+  !       call get_face_idx_from_id( idx, this%cells(i)%face_id(jj), dir, face_idx )
+  !       associate( fquad => grid%gblock(this%block_num)%grid_vars%face_quads(dir)%p(face_idx(1),face_idx(2),face_idx(3)), nbor  =>  this%cells(j) )
+  !         call this%cells(i)%get_nbor_contribution( nbor, fquad, term_start, term_end, dA, B(1:m,1:m,jj), dD, C(1:m,1:n,jj) )
+  !       end associate
+  !         A(1:m,1:m) = A(1:m,1:m) + dA
+  !         D(1:m,1:n) = D(1:m,1:n) + dD
+  !     end do
+  !     call LUdecomp(LU(1:m,1:m), P(1:m,1:m), A(1:m,1:m), m )
+  !   end associate
+  ! end subroutine get_cell_LHS
+
   subroutine get_cell_LHS( this, grid, lin_idx, term_start, term_end )
     use set_constants,           only : zero
     use index_conversion,        only : get_face_idx_from_id, global2local_bnd
@@ -3370,7 +3438,7 @@ contains
     use quadrature_derived_type, only : quad_t
     use var_rec_cell_derived_type, only : var_rec_cell_t
     class(var_rec_block_t), target, intent(inout) :: this
-    type(grid_type),        target, intent(in)    :: grid
+    type(grid_type),        intent(in)    :: grid
     integer,                        intent(in)    :: lin_idx, term_start, term_end
     real(dp), dimension(term_end - term_start, term_end - term_start ) :: dA
     real(dp), dimension(term_end - term_start,            term_start ) :: dD
@@ -3390,24 +3458,15 @@ contains
     this%cells(i)%D = zero
     this%cells(i)%LU = zero
     this%cells(i)%P  = zero
-    associate( A  => this%cells(i)%A,  &
-               B  => this%cells(i)%B,  &
-               C  => this%cells(i)%C,  &
-               D  => this%cells(i)%D,  &
-               LU => this%cells(i)%LU, &
-               P  => this%cells(i)%P )
       do jj = 1,n_interior
         j = this%cells(i)%nbor_idx(jj)
+        nbor => this%cells(j)
         call get_face_idx_from_id( idx, this%cells(i)%face_id(jj), dir, face_idx )
-        associate( fquad => grid%gblock(this%block_num)%grid_vars%face_quads(dir)%p(face_idx(1),face_idx(2),face_idx(3)) )!, nbor  =>  this%cells(j) )
-          nbor => this%cells(j)
-          call this%cells(i)%get_nbor_contribution( nbor, fquad, term_start, term_end, dA, B(1:m,1:m,jj), dD, C(1:m,1:n,jj) )
-        end associate
-          A(1:m,1:m) = A(1:m,1:m) + dA
-          D(1:m,1:n) = D(1:m,1:n) + dD
-      end do
-      call LUdecomp(LU(1:m,1:m), P(1:m,1:m), A(1:m,1:m), m )
-    end associate
+        call this%cells(i)%get_nbor_contribution( nbor, grid%gblock(this%block_num)%grid_vars%face_quads(dir)%p(face_idx(1),face_idx(2),face_idx(3)), term_start, term_end, dA, this%cells(i)%B(1:m,1:m,jj), dD, this%cells(i)%C(1:m,1:n,jj) )
+        this%cells(i)%A(1:m,1:m) = this%cells(i)%A(1:m,1:m) + dA
+        this%cells(i)%D(1:m,1:n) = this%cells(i)%D(1:m,1:n) + dD
+    end do
+    call LUdecomp(this%cells(i)%LU(1:m,1:m), this%cells(i)%P(1:m,1:m), this%cells(i)%A(1:m,1:m), m )
   end subroutine get_cell_LHS
 
   pure function get_cell_RHS( this, lin_idx, term_start, term_end, n_var, var_idx ) result(b)
@@ -3694,6 +3753,8 @@ contains
   end function test_function_2
 
   subroutine setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
+    ! use math, only : maximal_extents
+    ! use grid_derived_type, only : pack_cell_node_coords
     use grid_derived_type,           only : grid_type
     use var_rec_block_derived_type,  only : var_rec_block_t, spatial_function 
     use monomial_basis_derived_type, only : monomial_basis_t
@@ -3706,6 +3767,8 @@ contains
     integer :: block_num, term_start, term_end
     integer :: n
     procedure(spatial_function), pointer :: eval_fun => null()
+    ! real(dp), dimension(3,8) :: nodes
+    ! real(dp), dimension(n_dim)   :: h_ref
 
     eval_fun => test_function_1
     call grid%setup(1)
@@ -3713,6 +3776,9 @@ contains
     grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
     call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
     block_num = 1
+
+    ! nodes = pack_cell_node_coords( [1,1,1], [1,1,1], grid%gblock(block_num)%n_nodes, grid%gblock(block_num)%node_coords )
+    ! h_ref = maximal_extents( n_dim, 8, nodes(1:n_dim,:) )
     rec = var_rec_block_t( grid, block_num, n_dim, degree, n_vars )
 
     term_start = 1
