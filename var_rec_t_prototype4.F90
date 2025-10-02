@@ -3165,20 +3165,20 @@ contains
     this%n_vars     = n_vars
   end function constructor
 
-  pure function evaluate_reconstruction(this,point,var_idx,n_terms) result(val)
+  pure function evaluate_reconstruction(this,point,n_terms,n_var,var_idx) result(val)
     use set_constants, only : zero
     class(var_rec_cell_t),       intent(in) :: this
     real(dp), dimension(:), intent(in) :: point
+    integer,                intent(in) :: n_terms, n_var
     integer,  dimension(:), intent(in) :: var_idx
-    integer,                intent(in) :: n_terms
-    real(dp), dimension(size(var_idx)) :: val
+    real(dp), dimension(n_var)         :: val
     real(dp), dimension(n_terms) :: basis
     integer :: v, n
     val = zero
     do n = 1,n_terms
       basis(n) = this%basis%eval(n,point(1:this%basis%n_dim))
     end do
-    do v = 1,size(var_idx)
+    do v = 1,n_var
       val(v) = val(v) + dot_product( this%coefs(1:n_terms,var_idx(v)), basis )
     end do
   end function evaluate_reconstruction
@@ -3225,29 +3225,33 @@ contains
     D = D * xdij_mag
   end subroutine get_nbor_contribution
 
-  pure function get_self_RHS_contribution( this, term_start, term_end, var_idx ) result(b)
+  pure function get_self_RHS_contribution( this, term_start, term_end, n_var, var_idx ) result(b)
     use set_constants, only : zero, one
-    class(var_rec_cell_t),    intent(in) :: this
-    integer,             intent(in) :: term_start, term_end
-    integer,             intent(in) :: var_idx
-    real(dp), dimension( term_end - term_start ) :: b
-    integer :: n, m
-    n = term_end - term_start
-    m = term_start
-    b = matmul( this%D(1:n,1:m), this%coefs(1:m,var_idx) )
+    class(var_rec_cell_t),      intent(in) :: this
+    integer,                    intent(in) :: term_start, term_end, n_var
+    integer,  dimension(:),     intent(in) :: var_idx
+    real(dp), dimension( term_end - term_start, n_var ) :: b
+    integer :: n, m, v
+    m = term_end - term_start
+    n = term_start
+    do v = 1,n_var
+      b(:,v) = matmul( this%D(1:m,1:n), this%coefs(1:n,var_idx(v)) )
+    end do
   end function get_self_RHS_contribution
 
-  pure function get_nbor_RHS_contribution( this, nbor, nbor_id, term_start, term_end, var_idx ) result(b)
+  pure function get_nbor_RHS_contribution( this, nbor, nbor_id, term_start, term_end, n_var, var_idx ) result(b)
     use set_constants, only : zero, one
     class(var_rec_cell_t),    intent(in) :: this
     class(var_rec_cell_t),    intent(in) :: nbor
-    integer,                  intent(in) :: nbor_id, term_start, term_end
-    integer,                  intent(in) :: var_idx
-    real(dp), dimension( term_end - term_start ) :: b
-    integer :: n, m
-    n = term_end - term_start
-    m = term_start
-    b = matmul( this%C(1:n,1:m,nbor_id), nbor%coefs(1:m,var_idx) )
+    integer,                  intent(in) :: nbor_id, term_start, term_end, n_var
+    integer,  dimension(:),   intent(in) :: var_idx
+    real(dp), dimension( term_end - term_start, n_var ) :: b
+    integer :: n, m, v
+    m = term_end - term_start
+    n = term_start
+    do v = 1,n_var
+      b(:,v) = matmul( this%C(1:m,1:n,nbor_id), nbor%coefs(1:n,var_idx(v)) )
+    end do
   end function get_nbor_RHS_contribution
 
 end module var_rec_cell_derived_type
@@ -3259,6 +3263,7 @@ module var_rec_block_derived_type
   implicit none
   private
   public :: var_rec_block_t
+  public :: spatial_function
   type :: var_rec_block_t
     private
     integer, public                                 :: block_num, n_dim, degree, n_vars, n_cells_total
@@ -3268,12 +3273,25 @@ module var_rec_block_derived_type
   contains
     private
     procedure, public, pass :: destroy => destroy_var_rec_block_t
-    procedure, public, pass :: get_cell_lhs
+    procedure, public, pass :: solve   => perform_iterative_reconstruction_SOR
+    procedure, public, pass :: set_cell_avgs
+    procedure,         pass :: get_cell_lhs, get_cell_RHS
+    procedure,         pass :: get_cell_update, get_cell_residual, residual_norm
+    procedure,         pass :: SOR_iteration
   end type var_rec_block_t
 
   interface var_rec_block_t
     module procedure constructor
   end interface var_rec_block_t
+
+  abstract interface
+    pure function spatial_function(n_var,x) result(val)
+      use set_precision, only : dp
+      integer,                intent(in) :: n_var
+      real(dp), dimension(:), intent(in) :: x
+      real(dp), dimension(n_var)         :: val
+    end function spatial_function
+  end interface
 
 contains
 
@@ -3292,10 +3310,10 @@ contains
     this%n_cells_total = 0
   end subroutine destroy_var_rec_block_t
 
-  function constructor( grid, block_num, n_dim, degree, n_vars, term_start, term_end ) result(this)
+  function constructor( grid, block_num, n_dim, degree, n_var, term_start, term_end ) result(this)
     use grid_derived_type, only : grid_type
     type(grid_type),   intent(in) :: grid
-    integer,           intent(in) :: block_num, n_dim, degree, n_vars
+    integer,           intent(in) :: block_num, n_dim, degree, n_var
     integer, optional, intent(in) :: term_start, term_end
     type(var_rec_block_t)         :: this
     integer :: n, ts, te
@@ -3304,14 +3322,15 @@ contains
     allocate( this%n_cells( n_dim ) )
     this%n_cells        = grid%gblock(block_num)%n_cells(1:n_dim)
     this%n_cells_total  = product(this%n_cells)
+    this%block_num      = block_num
     this%n_dim          = n_dim
     this%degree         = degree
-    this%n_vars         = n_vars
+    this%n_vars         = n_var
     this%monomial_basis = monomial_basis_t( this%degree, this%n_dim )
     allocate( this%cells(this%n_cells_total) )
 
     do n = 1,this%n_cells_total
-      this%cells(n) = constructor_helper( grid, this%monomial_basis, block_num, n_vars, n_dim, n )
+      this%cells(n) = constructor_helper( grid, this%monomial_basis, n_dim, block_num, n, n_var )
     end do
 
     ts = 1
@@ -3321,18 +3340,18 @@ contains
     if (present(term_end)) ts = term_end
 
     do n = 1,this%n_cells_total
-      call this%get_cell_LHS( grid, ts, te, n )
+      call this%get_cell_LHS( grid, n, ts, te )
     end do
   end function constructor
 
-  function constructor_helper( grid, mono_basis, block_num, n_vars, n_dim, lin_idx ) result(cell_rec)
+  function constructor_helper( grid, mono_basis, n_dim, block_num, lin_idx, n_var ) result(cell_rec)
     use math,                      only : maximal_extents
     use index_conversion,          only : cell_face_nbors, global2local_bnd
     use grid_derived_type,         only : grid_type, pack_cell_node_coords
     use var_rec_cell_derived_type, only : var_rec_cell_t
     type(grid_type),           intent(in) :: grid
     type(monomial_basis_t),    intent(in) :: mono_basis
-    integer,                   intent(in) :: block_num, n_vars, n_dim, lin_idx
+    integer,                   intent(in) :: n_dim, block_num, lin_idx, n_var
     type(var_rec_cell_t)                  :: cell_rec
     integer,  dimension(3)     :: idx_tmp, lo, hi
     real(dp), dimension(3,8)   :: nodes
@@ -3349,11 +3368,11 @@ contains
     nodes = pack_cell_node_coords( idx_tmp, lo, hi, grid%gblock(block_num)%node_coords )
     h_ref = maximal_extents( n_dim, 8, nodes(1:n_dim,:) )
     associate( quad => grid%gblock(block_num)%grid_vars%quad( idx_tmp(1), idx_tmp(2), idx_tmp(3) ) )
-      cell_rec = var_rec_cell_t( n_dim, block_num, lin_idx, nbor_block, nbor_cell_idx, nbor_face_id, n_interior, n_vars, mono_basis, quad, h_ref )
+      cell_rec = var_rec_cell_t( n_dim, block_num, lin_idx, nbor_block, nbor_cell_idx, nbor_face_id, n_interior, n_var, mono_basis, quad, h_ref )
     end associate
   end function constructor_helper
 
-  subroutine get_cell_LHS( this, grid, term_start, term_end, lin_idx )
+  subroutine get_cell_LHS( this, grid, lin_idx, term_start, term_end )
     use set_constants,           only : zero
     use index_conversion,        only : get_face_idx_from_id, global2local_bnd
     use math,                    only : LUdecomp
@@ -3361,7 +3380,7 @@ contains
     use quadrature_derived_type, only : quad_t
     class(var_rec_block_t), target, intent(inout) :: this
     type(grid_type),        target, intent(in)    :: grid
-    integer,                        intent(in)    :: term_start, term_end, lin_idx
+    integer,                        intent(in)    :: lin_idx, term_start, term_end
     type(quad_t),         pointer :: fquad => null()
     real(dp), dimension(term_end - term_start, term_end - term_start ) :: dA
     real(dp), dimension(term_end - term_start,            term_start ) :: dD
@@ -3400,11 +3419,12 @@ contains
     end associate
   end subroutine get_cell_LHS
 
-  pure function get_cell_RHS( this, var_idx, term_start, term_end, lin_idx ) result(b)
+  pure function get_cell_RHS( this, lin_idx, term_start, term_end, n_var, var_idx ) result(b)
     use set_constants,           only : zero
-    class(var_rec_block_t), intent(in) :: this
-    integer,                intent(in) :: var_idx, term_start, term_end, lin_idx
-    real(dp), dimension(term_end-term_start) :: b
+    class(var_rec_block_t),     intent(in) :: this
+    integer,                    intent(in) :: term_start, term_end, lin_idx, n_var
+    integer,  dimension(:),     intent(in) :: var_idx
+    real(dp), dimension( term_end-term_start, n_var ) :: b
     integer :: i, j, jj, n_interior
     b = zero
     i = lin_idx
@@ -3412,38 +3432,218 @@ contains
     do jj = 1,n_interior
       j = this%cells(i)%nbor_idx(jj)
       associate( nbor => this%cells(j) )
-        b = b + this%cells(i)%get_nbor_RHS_contribution( nbor, jj, term_start, term_end, var_idx )
+        b = b + this%cells(i)%get_nbor_RHS_contribution( nbor, jj, term_start, term_end, n_var, var_idx )
       end associate
     end do
-    b = b - this%cells(i)%get_self_RHS_contribution( term_start, term_end, var_idx )
+    b = b - this%cells(i)%get_self_RHS_contribution( term_start, term_end, n_var, var_idx )
   end function get_cell_RHS
 
-  pure function get_cell_update( this, var_idx, term_start, term_end, lin_idx ) result(update)
+  pure function get_cell_update( this, lin_idx, term_start, term_end, n_var, var_idx ) result(update)
     use set_constants, only : zero, one
     use math, only : LUsolve
     class(var_rec_block_t), intent(in) :: this
-    integer,                intent(in) :: var_idx, term_start, term_end, lin_idx
-    real(dp), dimension(term_end-term_start) :: update
-    real(dp), dimension(term_end-term_start) :: RHS
-    integer :: i, j, m, n, jj, n_interior
+    integer,                intent(in) :: lin_idx, term_start, term_end, n_var
+    integer,  dimension(:), intent(in) :: var_idx
+    real(dp), dimension(term_end-term_start,n_var) :: update
+    real(dp), dimension(term_end-term_start,n_var) :: RHS
+    integer :: i, j, m, n, jj, v
     m = term_end - term_start
     n = term_start
     i = lin_idx
-    n_interior = this%cells(i)%n_interior
-    RHS = this%cells(i)%RHS(term_start+1:term_end,var_idx)
+    do v = 1,n_var
+      RHS(:,v) = this%cells(i)%RHS(term_start+1:term_end,var_idx(v))
+    end do
     associate( B  => this%cells(i)%B,  &
                LU => this%cells(i)%LU, &
-               P  => this%cells(i)%P   )
+               P  => this%cells(i)%P,  &
+               n_interior => this%cells(i)%n_interior )
       do jj = 1,n_interior
         j = this%cells(i)%nbor_idx(n)
         associate( nbor => this%cells(j) )
           RHS = RHS + matmul( B(1:m,1:m,jj), nbor%coefs(term_start+1:term_end,var_idx) )
         end associate
       end do
-      call LUsolve(update, LU(1:m,1:m), P(1:m,1:m), RHS, m )
+      call LUsolve(update, LU(1:m,1:m), P(1:m,1:m), RHS, m, n_var )
     end associate
     update = update - this%cells(i)%coefs(term_start+1:term_end,var_idx)
   end function get_cell_update
+
+  pure function get_cell_residual( this, lin_idx, term_start, term_end, n_var, var_idx ) result(residual)
+    use set_constants, only : zero, one
+    class(var_rec_block_t), intent(in)    :: this
+    integer,                intent(in)    :: lin_idx, term_start, term_end, n_var
+    integer, dimension(:),  intent(in)    :: var_idx
+    real(dp), dimension( term_end-term_start, n_var ) :: residual
+    integer :: m, n, i, j, jj, v
+    residual = zero
+    m = term_end - term_start
+    n = term_start
+    i = lin_idx
+    associate( A  => this%cells(i)%A,  &
+               B  => this%cells(i)%B,  &
+               n_interior => this%cells(i)%n_interior )
+      do v = 1,n_var
+        residual(:,v) = residual(:,v) + matmul( A(1:m,1:m), this%cells(i)%coefs(term_start+1:term_end,var_idx(v)) )
+      end do
+      residual = residual - this%get_cell_RHS(i,term_start,term_end,n_var,var_idx)
+      do jj = 1,n_interior
+        j = this%cells(i)%nbor_idx(jj)
+        do v = 1,n_var
+          residual(:,v) = residual(:,v) - matmul( B(1:m,1:m,jj), this%cells(j)%coefs(term_start+1:term_end,var_idx(v)) )
+        end do
+      end do
+    end associate
+  end function get_cell_residual
+
+  pure function residual_norm(this,term_start,term_end,n_var,var_idx) result(residual)
+    use set_constants, only : zero
+    class(var_rec_block_t), intent(in)    :: this
+    integer,                intent(in)    :: term_start, term_end, n_var
+    integer,  dimension(:), intent(in)    :: var_idx
+    real(dp), dimension(n_var)    :: residual
+    integer :: i
+    residual = zero
+    do i = 1,this%n_cells_total
+      residual = residual + sum( ( this%get_cell_residual(i,term_start,term_end,n_var,var_idx) )**2,dim=1 )
+    end do
+    residual = sqrt( residual )
+  end function residual_norm
+
+  subroutine SOR_iteration( this, term_start, term_end, n_var, var_idx, omega, residual )
+    use set_constants, only : zero, one
+    class(var_rec_block_t),       intent(inout) :: this
+    integer,                      intent(in)    :: term_start, term_end, n_var
+    integer,  dimension(:),       intent(in)    :: var_idx
+    real(dp),                     intent(in)    :: omega
+    real(dp), dimension(n_var),   intent(out) :: residual
+    real(dp), dimension(term_end-term_start,n_var) :: update
+    integer :: i, v
+    residual = zero
+    do i = 1,this%n_cells_total
+      update = omega * this%get_cell_update(i,term_start,term_end,n_var,var_idx)
+      residual = residual + sum( update**2,dim=1 )
+      do v = 1,n_var
+        this%cells(i)%coefs(term_start+1:term_end,var_idx(v)) = this%cells(i)%coefs(term_start+1:term_end,var_idx(v)) + update(:,v)
+      end do
+    end do
+    residual = sqrt( residual )
+  end subroutine SOR_iteration
+
+  subroutine perform_iterative_reconstruction_SOR(this,term_start,term_end,n_var,var_idx,omega,tol,n_iter,converged,residual)
+    use set_constants, only : zero, one
+    class(var_rec_block_t),       intent(inout) :: this
+    integer,                            intent(in)    :: term_start, term_end, n_var
+    integer,  dimension(:),             intent(in)    :: var_idx
+    real(dp), optional,                 intent(in)    :: omega, tol
+    integer,  optional,                 intent(in)    :: n_iter
+    logical,  optional,                 intent(out)   :: converged
+    real(dp), optional, dimension(:,:), allocatable, intent(out) :: residual
+    real(dp) :: omega_, tol_
+    real(dp), dimension(n_var) :: res_tmp, res_init
+    real(dp), dimension(n_var) :: res_tmp2, res_init2
+    integer :: n, n_iter_
+    logical :: converged_
+
+    omega_ = 1.3_dp
+    tol_   = 1.0e-8_dp
+    n_iter_ = 100
+    if ( present(omega)     ) omega_     = omega
+    if ( present(tol)       ) tol_       = tol
+    if ( present(n_iter)    ) n_iter_    = n_iter
+    if ( present(converged) ) converged  = .false.
+    converged_ = .false.
+    if (present(residual)) then
+      if (allocated(residual)) deallocate(residual)
+      allocate(residual(n_var,n_iter_))
+    end if
+    res_init2 = this%residual_norm( term_start, term_end, n_var, var_idx )
+    call this%SOR_iteration( term_start, term_end, n_var, var_idx, omega_, res_init )
+    write(*,*) 0, res_init, res_init2
+    if (any(res_init < epsilon(one))) then
+      converged_ = .true.
+      if ( present(converged) ) converged = converged_
+      return
+    end if
+
+    do n = 1,n_iter_
+      call this%SOR_iteration(term_start, term_end, n_var, var_idx, omega_, res_tmp )
+      res_tmp = res_tmp / res_init
+      res_tmp2  = this%residual_norm( term_start, term_end, n_var, var_idx )
+      res_tmp2 = res_tmp2 / res_init2
+      if (n==1 .or. mod(n,1)==0) write(*,*) n, res_tmp, res_tmp2
+      converged_ = all( res_tmp < tol_)
+      if ( present(residual ) ) residual(:,n) = res_tmp
+      if ( present(converged) ) converged     = converged_
+      if ( converged_ ) then
+        return
+      end if
+    end do
+  end subroutine perform_iterative_reconstruction_SOR
+
+  pure function get_cell_avg(quad,n_var,var_idx,eval_fun) result(avg)
+    use set_constants, only : zero
+    use quadrature_derived_type, only : quad_t
+    type(quad_t),           intent(in) :: quad
+    integer,                intent(in) :: n_var
+    integer,  dimension(:), intent(in) :: var_idx
+    procedure(spatial_function)        :: eval_fun
+    real(dp), dimension(n_var)         :: avg
+    real(dp), dimension(n_var,quad%n_quad) :: tmp_val
+    integer :: n
+    tmp_val = zero
+    do n = 1,quad%n_quad
+      tmp_val(:,n) = eval_fun( n_var, quad%quad_pts(:,n) )
+    end do
+    avg = quad%integrate( n_var, tmp_val ) / sum( quad%quad_wts)
+  end function get_cell_avg
+
+  pure subroutine set_cell_avgs(this,gblock,n_var,var_idx,eval_fun)
+    use grid_derived_type,       only : grid_block
+    use index_conversion,        only : global2local
+    class(var_rec_block_t), intent(inout) :: this
+    type(grid_block),       intent(in)    :: gblock
+    integer,                intent(in)    :: n_var
+    integer,  dimension(:), intent(in)    :: var_idx
+    procedure(spatial_function)           :: eval_fun
+    real(dp), dimension(n_var) :: tmp_val
+    integer,  dimension(3)     :: tmp_idx
+    integer :: i, v
+    tmp_idx = 1
+    do i = 1, this%n_cells_total
+      tmp_idx(1:this%n_dim) = global2local(i,this%n_cells)
+      tmp_val = get_cell_avg( gblock%grid_vars%quad(tmp_idx(1),tmp_idx(2),tmp_idx(3)), n_var, var_idx, eval_fun )
+      do v = 1,n_var
+        this%cells(i)%coefs(1,var_idx(v)) = tmp_val(v)
+      end do
+    end do
+  end subroutine set_cell_avgs
+
+  pure function get_cell_error( this, quad, lin_idx, n_terms, norm, n_var, var_idx, eval_fun ) result(err)
+    use set_constants, only : zero, one
+    use quadrature_derived_type, only : quad_t
+    class(var_rec_block_t), intent(in) :: this
+    type(quad_t),           intent(in) :: quad
+    integer,                intent(in) :: lin_idx, n_terms, norm, n_var
+    integer, dimension(:),  intent(in) :: var_idx
+    procedure(spatial_function)        :: eval_fun
+    real(dp), dimension(n_var) :: reconstructed, exact, err
+    real(dp), dimension(n_var,quad%n_quad) :: tmp_val
+    integer, parameter :: max_L_norm = 10
+    integer :: n
+    tmp_val = zero
+    do n = 1,quad%n_quad
+      exact = eval_fun( n_var, quad%quad_pts(:,n) )
+      reconstructed = this%cells(lin_idx)%eval( quad%quad_pts(:,n), n_terms, n_var, var_idx )
+      tmp_val(:,n) = abs( reconstructed - exact )
+    end do
+    if (norm>max_L_norm) then
+      err = maxval(tmp_val,dim=2)
+    else
+      err = quad%integrate( size(var_idx), tmp_val**norm )**(one/real(norm,dp))
+      err = err / sum( quad%quad_wts)**(one/real(norm,dp))
+    end if
+    
+  end function get_cell_error
 
 end module var_rec_block_derived_type
 
@@ -3469,11 +3669,29 @@ module test_problem
   implicit none
   private
   public :: setup_grid_and_rec
+  public :: test_function_1, test_function_2
 contains
+
+  pure function test_function_1(n_var,x) result(val)
+    integer,                intent(in) :: n_var
+    real(dp), dimension(:), intent(in) :: x
+    real(dp), dimension(n_var)         :: val
+
+    val(1) = 999.0_dp * x(1) - 888.0_dp * x(2) + 777.0_dp * x(3) - 666.0_dp
+  end function test_function_1
+
+  pure function test_function_2(n_var,x) result(val)
+  use set_constants, only : pi
+    integer,                intent(in) :: n_var
+    real(dp), dimension(:), intent(in) :: x
+    real(dp), dimension(n_var)         :: val
+    val(1) = sin(pi*x(1)) * sin(pi*x(2)) * sin(pi*x(3))
+    ! val(1) = sin(pi*x(1)) * sin(pi*x(2))
+  end function test_function_2
 
   subroutine setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
     use grid_derived_type,           only : grid_type
-    use var_rec_block_derived_type,  only : var_rec_block_t
+    use var_rec_block_derived_type,  only : var_rec_block_t, 
     use monomial_basis_derived_type, only : monomial_basis_t
     use linspace_helper,             only : unit_cartesian_mesh_cat
     integer,                     intent(in)  :: n_dim, n_vars, degree
@@ -3482,7 +3700,9 @@ contains
     type(var_rec_block_t),       intent(out) :: rec
     logical :: converged
     integer :: block_num, term_start, term_end
+    procedure(spatial_function), pointer :: eval_fun => null()
 
+    eval_fun => test_function_1
     call grid%setup(1)
     call grid%gblock(1)%setup(n_dim,n_nodes,n_ghost)
     grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
@@ -3490,7 +3710,7 @@ contains
     block_num = 1
     rec = var_rec_block_t( grid, block_num, n_dim, degree, n_vars )
 
-    ! call rec%set_cell_avgs(grid%gblock(1),eval_fun)
+    call rec%set_cell_avgs(grid%gblock(1),eval_fun)
     ! call rec%solve(term_start,term_end,omega=1.3_dp,tol=1e-10_dp,n_iter=100,norm=2,converged=converged)
     ! write(*,*) 'converged =', converged
     ! write(*,*) 'Error: ', rec%get_error_norm(grid%gblock(1),[1],rec%n_terms,[1,2,huge(1)],eval_fun)
