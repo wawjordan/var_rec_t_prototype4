@@ -2850,9 +2850,9 @@ contains
   pure subroutine evaluate_monomial(this,term,x,val,coef)
     use set_precision, only : dp
     use set_constants, only : one
-    class(monomial_basis_t),         intent(in)  :: this
-    integer,                         intent(in)  :: term
-    real(dp), dimension(this%n_dim), intent(in)  :: x
+    class(monomial_basis_t), intent(in)  :: this
+    integer,                 intent(in)  :: term
+    real(dp), dimension(:),  intent(in)  :: x
     real(dp),                        intent(out) :: val
     integer,                         intent(out) :: coef
     integer :: d, i
@@ -2871,8 +2871,8 @@ contains
     use set_constants, only : zero, one
     class(monomial_basis_t),         intent(in)  :: this
     integer,                         intent(in)  :: term
-    real(dp), dimension(this%n_dim), intent(in)  :: x
-    integer,  dimension(this%n_dim), intent(in)  :: order
+    real(dp), dimension(:),          intent(in)  :: x
+    integer,  dimension(:),          intent(in)  :: order
     real(dp),                        intent(out) :: dval
     integer,                         intent(out) :: dcoef, coef
     integer :: d, i
@@ -2880,7 +2880,7 @@ contains
     dcoef = 1
     coef  = 1
     dval  = zero
-    if ( any( this%exponents(:,term)-order < 0 ) ) return
+    if ( any( this%exponents(:,term)-order(1:this%n_dim) < 0 ) ) return
 
     dval  = one
     do d = 1,this%n_dim
@@ -2905,21 +2905,15 @@ module zero_mean_basis_derived_type
   public :: zero_mean_basis_t
   type :: zero_mean_basis_t
     private
-    type(monomial_basis_t), pointer :: mono_basis => null()
     real(dp), public, allocatable, dimension(:)   :: moments
     real(dp), public, allocatable, dimension(:)   :: x_ref
     real(dp), public, allocatable, dimension(:)   :: h_ref
-    integer, public, pointer :: total_degree
-    integer, public, pointer :: n_dim
-    integer, public, pointer :: n_terms
-    integer, public, pointer, dimension(:)   :: idx
-    integer, public, pointer, dimension(:,:)   :: exponents
   contains
     private
-    procedure, pass :: compute_grid_moment
+    procedure, pass :: compute_grid_moments
     procedure, pass :: transform
     
-    procedure, nopass :: length_scale  => get_length_scale_vector
+    procedure, nopass       :: length_scale  => get_length_scale_vector
     procedure, public, pass :: eval  => evaluate_basis
     procedure, public, pass :: deval => evaluate_basis_derivative
     procedure, public, pass :: scaled_basis_derivative
@@ -2934,31 +2928,21 @@ module zero_mean_basis_derived_type
 
 contains
 
-function constructor( mono_basis, quad, h_ref ) result(this)
-  use monomial_basis_derived_type, only : monomial_basis_t
-  type(monomial_basis_t), target, intent(in) :: mono_basis
-  type(quad_t), intent(in)                   :: quad
-  real(dp),     intent(in), dimension(:) :: h_ref
-  type(zero_mean_basis_t) :: this
+function constructor( p, quad, h_ref ) result(this)
+  type(monomial_basis_t), intent(in) :: p
+  type(quad_t),           intent(in) :: quad
+  real(dp), dimension(:), intent(in) :: h_ref
+  type(zero_mean_basis_t)            :: this
   integer :: n
 
   call this%destroy()
-  this%mono_basis => mono_basis
-  this%total_degree => mono_basis%total_degree
-  this%n_dim        => mono_basis%n_dim
-  this%n_terms      => mono_basis%n_terms
-  this%idx          => mono_basis%idx
-  this%exponents    => mono_basis%exponents
-
-    allocate( this%moments( this%n_terms ) )
-  allocate( this%x_ref( this%n_dim ) )
-  allocate( this%h_ref( this%n_dim ) )
-  this%h_ref = h_ref
-  this%x_ref = quad%integrate( this%n_dim, quad%quad_pts(1:this%n_dim,:) ) / sum( quad%quad_wts )
-  do n = 1,this%n_terms
-    this%moments(n) = this%compute_grid_moment(n,quad)
-  end do
-  ! this%moments = this%compute_grid_moment([(n,n=1,this%n_terms)],quad)
+  allocate( this%moments( p%n_terms ) )
+  allocate( this%x_ref( p%n_dim ) )
+  allocate( this%h_ref( p%n_dim ) )
+  this%h_ref   = h_ref(1:p%n_dim)
+  this%x_ref   = quad%integrate( p%n_dim, quad%quad_pts(1:p%n_dim,:) ) / sum( quad%quad_wts )
+  this%moments = this%compute_grid_moments(p,quad)
+  ! this%moments = this%compute_grid_moment([(n,n=1,p%n_terms)],quad)
 end function constructor
 
 pure subroutine destroy_zero_mean_basis_t(this)
@@ -2968,60 +2952,69 @@ pure subroutine destroy_zero_mean_basis_t(this)
   if ( allocated(this%h_ref)   ) deallocate( this%h_ref   )
 end subroutine destroy_zero_mean_basis_t
 
-pure function transform(this,x) result(x_bar)
+pure function transform(this,n_dim,x) result(x_bar)
   class(zero_mean_basis_t), intent(in) :: this
-  real(dp), dimension(this%n_dim), intent(in) :: x
-  real(dp), dimension(this%n_dim) :: x_bar
-  x_bar = (x-this%x_ref)/this%h_ref
+  integer,                  intent(in) :: n_dim
+  real(dp), dimension(:),   intent(in) :: x
+  real(dp), dimension(n_dim)           :: x_bar
+  x_bar = (x(1:n_dim)-this%x_ref)/this%h_ref
 end function transform
 
-pure elemental function compute_grid_moment(this,term,quad) result(moment)
-  class(zero_mean_basis_t), intent(in) :: this
-  integer,                  intent(in) :: term
-  type(quad_t),             intent(in) :: quad
-  real(dp), dimension(quad%n_quad) :: tmp
-  real(dp), dimension(this%n_dim) :: xtmp
-  real(dp) :: moment
-  integer :: q, coef
-    do q = 1,quad%n_quad
-      xtmp = this%transform( quad%quad_pts(1:this%n_dim,q) )
-      call this%mono_basis%eval( term, xtmp, tmp(q), coef )
-    end do
-    moment = quad%integrate(tmp) / sum( quad%quad_wts )
-end function compute_grid_moment
-
-pure function evaluate_basis(this,term,point) result(B)
+pure function compute_grid_moments(this,p,quad) result(moments)
   use set_constants, only : one
   class(zero_mean_basis_t), intent(in) :: this
-  integer,                  intent(in) :: term
-  real(dp), dimension(this%n_dim), intent(in) :: point
+  type(monomial_basis_t),   intent(in) :: p
+  type(quad_t),             intent(in) :: quad
+  real(dp), dimension(p%n_terms)       :: moments
+  real(dp), dimension(quad%n_quad)         :: tmp
+  real(dp), dimension(p%n_dim,quad%n_quad) :: xtmp
+  integer :: n, q, coef
+  do q = 1,quad%n_quad
+    xtmp(:,q) = this%transform( p%n_dim, quad%quad_pts(:,q) )
+  end do
+  do n = 1,p%n_terms
+    do q = 1,quad%n_quad
+      call p%eval( n, xtmp(:,q), tmp(q), coef )
+    end do
+    moments(n) = quad%integrate(tmp)
+  end do
+  moments = moments / sum( quad%quad_wts )
+end function compute_grid_moments
+
+pure function evaluate_basis(this,p,term,point) result(B)
+  use set_constants, only : one
+  class(zero_mean_basis_t),     intent(in) :: this
+  type(monomial_basis_t),       intent(in) :: p
+  integer,                      intent(in) :: term
+  real(dp), dimension(:),       intent(in) :: point
   real(dp) :: B
   integer :: coef
   B = one
   if (term == 1) return
-  call this%mono_basis%eval( term, this%transform(point), B, coef )
+  call p%eval( term, this%transform(p%n_dim,point), B, coef )
   B = B - this%moments(term)
 end function evaluate_basis
 
-pure function evaluate_basis_derivative(this,term,point,order) result(dB)
+pure function evaluate_basis_derivative(this,p,term,point,order) result(dB)
   use set_constants, only : zero, one
   class(zero_mean_basis_t), intent(in) :: this
+  type(monomial_basis_t),   intent(in) :: p
   integer,                  intent(in) :: term
-  integer,  dimension(this%n_dim), intent(in) :: order
-  real(dp), dimension(this%n_dim), intent(in) :: point
+  integer,  dimension(:), intent(in) :: order
+  real(dp), dimension(:), intent(in) :: point
   real(dp) :: dB
   integer :: dcoef,coef
 
   if (all(order==0)) then
-    dB =  this%eval(term,point)
+    dB =  this%eval(p,term,point)
     return
   end if
 
   dB = zero
   if (term==1) return
 
-  call this%mono_basis%deval( term, this%transform(point), order, dB, dcoef, coef )
-  dB = dB * dcoef / product( this%h_ref ** order )
+  call p%deval( term, this%transform(p%n_dim,point), order, dB, dcoef, coef )
+  dB = dB * real( dcoef, dp ) / product( this%h_ref ** order(1:p%n_dim) )
 end function evaluate_basis_derivative
 
 pure function get_length_scale_vector( order, scale ) result(L)
@@ -3043,24 +3036,26 @@ pure function get_length_scale_vector( order, scale ) result(L)
 
 end function get_length_scale_vector
 
-pure function scaled_basis_derivative( this, term_idx, diff_idx, point, scale ) result(derivative)
-  class(zero_mean_basis_t),        intent(in) :: this
-  integer,                         intent(in) :: term_idx, diff_idx
-  real(dp), dimension(this%n_dim), intent(in) :: point
-  real(dp), dimension(this%n_dim), intent(in) :: scale
-  real(dp)                                    :: derivative
+pure function scaled_basis_derivative( this, p, term_idx, diff_idx, point, scale ) result(derivative)
+  class(zero_mean_basis_t), intent(in) :: this
+  type(monomial_basis_t),   intent(in) :: p
+  integer,                  intent(in) :: term_idx, diff_idx
+  real(dp), dimension(:),   intent(in) :: point
+  real(dp), dimension(:),   intent(in) :: scale
+  real(dp)                             :: derivative
   real(dp) :: L
-  derivative = this%deval( term_idx, point, this%exponents(:,diff_idx) )
-  L = this%length_scale( this%exponents(:,diff_idx), scale )
+  derivative = this%deval( p, term_idx, point, p%exponents(:,diff_idx) )
+  L = this%length_scale( p%exponents(:,diff_idx), scale )
   derivative = derivative * L
 end function scaled_basis_derivative
 
-pure function scaled_basis_derivatives( this, term_start, term_end, point, scale ) result(derivatives)
+pure function scaled_basis_derivatives( this, p, term_start, term_end, point, scale ) result(derivatives)
   use set_constants, only : zero
-  class(zero_mean_basis_t),        intent(in) :: this
-  integer,                         intent(in) :: term_start, term_end
-  real(dp), dimension(this%n_dim), intent(in) :: point
-  real(dp), dimension(this%n_dim), intent(in) :: scale
+  class(zero_mean_basis_t),                 intent(in) :: this
+  type(monomial_basis_t),                   intent(in) :: p
+  integer,                                  intent(in) :: term_start, term_end
+  real(dp), dimension(:),                   intent(in) :: point
+  real(dp), dimension(:),                   intent(in) :: scale
   real(dp), dimension(term_end, term_end - term_start) :: derivatives
   integer :: i, j
   derivatives = zero
@@ -3068,7 +3063,7 @@ pure function scaled_basis_derivatives( this, term_start, term_end, point, scale
   do j = term_start+1,term_end
     ! inner loop over derivatives
     do i = 1,j
-      derivatives(i,j-term_start) = this%scaled_basis_derivative(j,i,point,scale);
+      derivatives(i,j-term_start) = this%scaled_basis_derivative(p,j,i,point,scale);
     end do
   end do
 end function scaled_basis_derivatives
@@ -3127,32 +3122,28 @@ contains
     if ( allocated(this%C         ) ) deallocate( this%C          )
   end subroutine destroy_var_rec_cell_t
 
-  function constructor( n_dim, self_block, self_idx, nbor_block, nbor_idx, face_id, n_interior, n_vars, mono_basis, quad, h_ref ) result(this)
+  function constructor( p, self_block, self_idx, nbor_block, nbor_idx, face_id, n_interior, n_vars, quad, h_ref ) result(this)
     use set_constants, only : zero
-    integer,                       intent(in) :: n_dim, self_block, self_idx
-    integer, dimension(2*n_dim),   intent(in) :: nbor_block, nbor_idx, face_id
+    type(monomial_basis_t),        intent(in) :: p
+    integer,                       intent(in) :: self_block, self_idx
+    integer, dimension(2*p%n_dim), intent(in) :: nbor_block, nbor_idx, face_id
     integer,                       intent(in) :: n_interior, n_vars
-    type(monomial_basis_t),        intent(in) :: mono_basis
     type(quad_t),                  intent(in) :: quad
-    real(dp), dimension(n_dim),    intent(in) :: h_ref
+    real(dp), dimension(p%n_dim),  intent(in) :: h_ref
     type(var_rec_cell_t)                      :: this
-
-    integer :: n_terms
-
     call this%destroy()
-    this%basis = zero_mean_basis_t( mono_basis, quad, h_ref )
-    n_terms = this%basis%n_terms
-    allocate( this%nbor_block( 2*n_dim ) )
-    allocate( this%nbor_idx(   2*n_dim ) )
-    allocate( this%face_id(    2*n_dim ) )
-    allocate( this%coefs( n_terms, n_vars ) )
-    allocate( this%RHS(n_terms-1, n_vars ) )
-    allocate( this%A(  n_terms-1, n_terms-1 ) )
-    allocate( this%D(  n_terms-1, n_terms-1 ) )
-    allocate( this%LU( n_terms-1, n_terms-1 ) )
-    allocate( this%P(  n_terms-1, n_terms-1 ) )
-    allocate( this%B(  n_terms-1, n_terms-1, n_interior ) )
-    allocate( this%C(  n_terms-1, n_terms-1, n_interior ) )
+    this%basis = zero_mean_basis_t( p, quad, h_ref )
+    allocate( this%nbor_block( 2*p%n_dim ) )
+    allocate( this%nbor_idx(   2*p%n_dim ) )
+    allocate( this%face_id(    2*p%n_dim ) )
+    allocate( this%coefs( p%n_terms, n_vars ) )
+    allocate( this%RHS(p%n_terms-1, n_vars ) )
+    allocate( this%A(  p%n_terms-1, p%n_terms-1 ) )
+    allocate( this%D(  p%n_terms-1, p%n_terms-1 ) )
+    allocate( this%LU( p%n_terms-1, p%n_terms-1 ) )
+    allocate( this%P(  p%n_terms-1, p%n_terms-1 ) )
+    allocate( this%B(  p%n_terms-1, p%n_terms-1, n_interior ) )
+    allocate( this%C(  p%n_terms-1, p%n_terms-1, n_interior ) )
     this%coefs      = zero
     this%RHS        = zero
     this%A = zero; this%B = zero; this%C = zero; this%D = zero; this%LU = zero; this%P = zero
@@ -3165,46 +3156,45 @@ contains
     this%n_vars     = n_vars
   end function constructor
 
-  pure function evaluate_reconstruction(this,point,n_terms,n_var,var_idx) result(val)
+  pure function evaluate_reconstruction(this,p,point,n_terms,n_var,var_idx) result(val)
     use set_constants, only : zero
-    class(var_rec_cell_t),       intent(in) :: this
-    real(dp), dimension(:), intent(in) :: point
-    integer,                intent(in) :: n_terms, n_var
-    integer,  dimension(:), intent(in) :: var_idx
-    real(dp), dimension(n_var)         :: val
+    class(var_rec_cell_t),      intent(in) :: this
+    type(monomial_basis_t),     intent(in) :: p
+    real(dp), dimension(:),     intent(in) :: point
+    integer,                    intent(in) :: n_terms, n_var
+    integer,  dimension(n_var), intent(in) :: var_idx
+    real(dp), dimension(n_var)             :: val
     real(dp), dimension(n_terms) :: basis
     integer :: v, n
     val = zero
     do n = 1,n_terms
-      basis(n) = this%basis%eval(n,point(1:this%basis%n_dim))
+      basis(n) = this%basis%eval(p,n,point)
     end do
     do v = 1,n_var
       val(v) = val(v) + dot_product( this%coefs(1:n_terms,var_idx(v)), basis )
     end do
   end function evaluate_reconstruction
 
-  pure subroutine get_nbor_contribution( this, nbor, fquad, term_start, term_end, A, B, D, C )
+  pure subroutine get_nbor_contribution( this, nbor, p, fquad, term_start, term_end, A, B, D, C )
     use set_constants, only : zero, one
-    class(var_rec_cell_t), intent(in) :: this
-    class(var_rec_cell_t), intent(in) :: nbor
-    class(quad_t),         intent(in) :: fquad
-    integer,               intent(in) :: term_start, term_end
+    class(var_rec_cell_t),  intent(in) :: this
+    class(var_rec_cell_t),  intent(in) :: nbor
+    type(monomial_basis_t), intent(in) :: p
+    class(quad_t),          intent(in) :: fquad
+    integer,                intent(in) :: term_start, term_end
     real(dp), dimension(term_end - term_start, term_end - term_start), intent(out) :: A, B
     real(dp), dimension(term_end - term_start, term_start),            intent(out) :: D, C
     real(dp), dimension(term_end,term_end) :: d_basis_i
     real(dp), dimension(term_end,term_end) :: d_basis_j
     integer :: q, l, m
-    ! real(dp), dimension(this%basis%n_dim) :: dij
-    ! real(dp), dimension(this%basis%n_dim) :: dij
-    real(dp), allocatable, dimension(:) :: dij
+    real(dp), dimension(p%n_dim) :: dij
     real(dp) :: xdij_mag
 
-    allocate(dij(this%basis%n_dim))
     A = zero; B = zero; C = zero; D = zero
     dij = abs( this%basis%x_ref - nbor%basis%x_ref )
     do q = 1,fquad%n_quad
-      d_basis_i = this%basis%scaled_basis_derivatives( 0, term_end, fquad%quad_pts(:,q), dij )
-      d_basis_j = nbor%basis%scaled_basis_derivatives( 0, term_end, fquad%quad_pts(:,q), dij )
+      d_basis_i = this%basis%scaled_basis_derivatives( p, 0, term_end, fquad%quad_pts(:,q), dij )
+      d_basis_j = nbor%basis%scaled_basis_derivatives( p, 0, term_end, fquad%quad_pts(:,q), dij )
       ! LHS
       do m = 1,term_end-term_start
         do l = 1,term_end-term_start
@@ -3226,7 +3216,6 @@ contains
     B = B * xdij_mag
     C = C * xdij_mag
     D = D * xdij_mag
-    deallocate(dij)
   end subroutine get_nbor_contribution
 
   pure function get_self_RHS_contribution( this, term_start, term_end, n_var, var_idx ) result(b)
@@ -3258,8 +3247,6 @@ contains
     end do
   end function get_nbor_RHS_contribution
 
-
-
 end module var_rec_cell_derived_type
 
 module var_rec_block_derived_type
@@ -3275,14 +3262,14 @@ module var_rec_block_derived_type
     integer, public                                 :: block_num, n_dim, degree, n_vars, n_cells_total
     integer, public,      dimension(:), allocatable :: n_cells
     type(var_rec_cell_t), dimension(:), allocatable :: cells
-    type(monomial_basis_t), public :: monomial_basis
+    type(monomial_basis_t), public :: p
   contains
     private
     procedure, public, pass :: destroy => destroy_var_rec_block_t
     procedure, public, pass :: solve   => perform_iterative_reconstruction_SOR
     procedure, public, pass :: set_cell_avgs, init_cells
-    procedure, public, pass :: get_cell_error
-    procedure,         pass :: get_cell_lhs, get_cell_RHS
+    procedure, public, pass :: get_cell_error, get_error_norm
+    procedure,         pass :: get_cell_LHS, get_cell_RHS
     procedure,         pass :: get_cell_update, get_cell_residual, residual_norm
     procedure,         pass :: SOR_iteration
   end type var_rec_block_t
@@ -3309,7 +3296,6 @@ contains
       call this%cells%destroy()
       deallocate( this%cells )
     end if
-    call this%monomial_basis%destroy()
     this%block_num     = 0
     this%n_dim         = 0
     this%degree        = 0
@@ -3331,7 +3317,6 @@ contains
     real(dp), dimension(n_dim) :: h_ref
     integer,  dimension(2*n_dim) :: nbor_block, nbor_cell_idx, nbor_face_id
     integer :: n, n_interior
-
     call this%destroy()
     allocate( this%n_cells( n_dim ) )
     this%n_cells        = grid%gblock(block_num)%n_cells(1:n_dim)
@@ -3340,7 +3325,7 @@ contains
     this%n_dim          = n_dim
     this%degree         = degree
     this%n_vars         = n_var
-    this%monomial_basis = monomial_basis_t( this%degree, this%n_dim )
+    this%p = monomial_basis_t( this%degree, this%n_dim )
     allocate( this%cells(this%n_cells_total) )
 
     lo = [1,1,1]; hi1 = grid%gblock(block_num)%n_cells; hi2 = grid%gblock(block_num)%n_nodes
@@ -3351,84 +3336,9 @@ contains
       nbor_block = block_num
       nodes = pack_cell_node_coords( idx_tmp, lo, hi2, grid%gblock(block_num)%node_coords )
       h_ref = maximal_extents( n_dim, 8, nodes(1:n_dim,:) )
-      this%cells(n) = var_rec_cell_t( n_dim, block_num, n, nbor_block, nbor_cell_idx, nbor_face_id, n_interior, n_var, this%monomial_basis, grid%gblock(block_num)%grid_vars%quad( idx_tmp(1), idx_tmp(2), idx_tmp(3) ), h_ref )
+      this%cells(n) = var_rec_cell_t( this%p, block_num, n, nbor_block, nbor_cell_idx, nbor_face_id, n_interior, n_var, grid%gblock(block_num)%grid_vars%quad( idx_tmp(1), idx_tmp(2), idx_tmp(3) ), h_ref )
     end do
   end function constructor
-
-  function constructor_helper( grid, mono_basis, n_dim, block_num, lin_idx, n_var ) result(cell_rec)
-    use math,                      only : maximal_extents
-    use index_conversion,          only : cell_face_nbors, global2local_bnd
-    use grid_derived_type,         only : grid_type, pack_cell_node_coords
-    use var_rec_cell_derived_type, only : var_rec_cell_t
-    type(grid_type),           intent(in) :: grid
-    type(monomial_basis_t),    intent(in) :: mono_basis
-    integer,                   intent(in) :: n_dim, block_num, lin_idx, n_var
-    type(var_rec_cell_t)                  :: cell_rec
-    integer,  dimension(3)     :: idx_tmp, lo, hi
-    real(dp), dimension(3,8)   :: nodes
-    real(dp), dimension(n_dim) :: h_ref
-    integer :: n_interior
-    integer,  dimension(2*n_dim) :: nbor_block, nbor_cell_idx, nbor_face_id
-    lo = [1,1,1]; hi = grid%gblock(block_num)%n_cells
-    idx_tmp = 1
-    idx_tmp(1:n_dim) = global2local_bnd( lin_idx, lo(1:n_dim), hi(1:n_dim) )
-    call cell_face_nbors( n_dim, lin_idx, lo(1:n_dim), hi(1:n_dim), nbor_cell_idx, nbor_face_id, n_interior )
-    nbor_block = block_num
-
-    lo = [1,1,1]; hi = grid%gblock(block_num)%n_nodes
-    nodes = pack_cell_node_coords( idx_tmp, lo, hi, grid%gblock(block_num)%node_coords )
-    h_ref = maximal_extents( n_dim, 8, nodes(1:n_dim,:) )
-    associate( quad => grid%gblock(block_num)%grid_vars%quad( idx_tmp(1), idx_tmp(2), idx_tmp(3) ) )
-      cell_rec = var_rec_cell_t( n_dim, block_num, lin_idx, nbor_block, nbor_cell_idx, nbor_face_id, n_interior, n_var, mono_basis, quad, h_ref )
-    end associate
-  end function constructor_helper
-
-  ! subroutine get_cell_LHS( this, grid, lin_idx, term_start, term_end )
-  !   use set_constants,           only : zero
-  !   use index_conversion,        only : get_face_idx_from_id, global2local_bnd
-  !   use math,                    only : LUdecomp
-  !   use grid_derived_type,       only : grid_type
-  !   use quadrature_derived_type, only : quad_t
-  !   use var_rec_cell_derived_type, only : var_rec_cell_t
-  !   class(var_rec_block_t), target, intent(inout) :: this
-  !   type(grid_type),        target, intent(in)    :: grid
-  !   integer,                        intent(in)    :: lin_idx, term_start, term_end
-  !   real(dp), dimension(term_end - term_start, term_end - term_start ) :: dA
-  !   real(dp), dimension(term_end - term_start,            term_start ) :: dD
-  !   integer, dimension(3) :: lo, hi, idx, face_idx
-  !   integer :: i, j, jj, m, n, dir, n_interior
-  !   ! type(var_rec_cell_t), pointer :: nbor => null()
-  !   m = term_end - term_start
-  !   n = term_start
-  !   i = lin_idx
-  !   lo = [1,1,1]; hi = grid%gblock(this%block_num)%n_cells
-  !   idx = 1; idx(1:this%n_dim) = global2local_bnd(i,lo,hi)
-  !   n_interior = this%cells(lin_idx)%n_interior
-
-  !   this%cells(i)%A = zero
-  !   this%cells(i)%B = zero
-  !   this%cells(i)%C = zero
-  !   this%cells(i)%D = zero
-  !   this%cells(i)%LU = zero
-  !   this%cells(i)%P  = zero
-  !   associate( A  => this%cells(i)%A,  &
-  !              B  => this%cells(i)%B,  &
-  !              C  => this%cells(i)%C,  &
-  !              D  => this%cells(i)%D,  &
-  !              LU => this%cells(i)%LU, &
-  !              P  => this%cells(i)%P )
-  !     do jj = 1,n_interior
-  !       j = this%cells(i)%nbor_idx(jj)
-  !       call get_face_idx_from_id( idx, this%cells(i)%face_id(jj), dir, face_idx )
-  !       associate( fquad => grid%gblock(this%block_num)%grid_vars%face_quads(dir)%p(face_idx(1),face_idx(2),face_idx(3)), nbor  =>  this%cells(j) )
-  !         call this%cells(i)%get_nbor_contribution( nbor, fquad, term_start, term_end, dA, B(1:m,1:m,jj), dD, C(1:m,1:n,jj) )
-  !       end associate
-  !         A(1:m,1:m) = A(1:m,1:m) + dA
-  !         D(1:m,1:n) = D(1:m,1:n) + dD
-  !     end do
-  !     call LUdecomp(LU(1:m,1:m), P(1:m,1:m), A(1:m,1:m), m )
-  !   end associate
-  ! end subroutine get_cell_LHS
 
   subroutine get_cell_LHS( this, grid, lin_idx, term_start, term_end )
     use set_constants,           only : zero
@@ -3437,19 +3347,18 @@ contains
     use grid_derived_type,       only : grid_type
     use quadrature_derived_type, only : quad_t
     use var_rec_cell_derived_type, only : var_rec_cell_t
-    class(var_rec_block_t), target, intent(inout) :: this
+    class(var_rec_block_t), intent(inout) :: this
     type(grid_type),        intent(in)    :: grid
-    integer,                        intent(in)    :: lin_idx, term_start, term_end
+    integer,                intent(in)    :: lin_idx, term_start, term_end
     real(dp), dimension(term_end - term_start, term_end - term_start ) :: dA
     real(dp), dimension(term_end - term_start,            term_start ) :: dD
     integer, dimension(3) :: lo, hi, idx, face_idx
     integer :: i, j, jj, m, n, dir, n_interior
-    type(var_rec_cell_t), pointer :: nbor => null()
     m = term_end - term_start
     n = term_start
     i = lin_idx
     lo = [1,1,1]; hi = grid%gblock(this%block_num)%n_cells
-    idx = 1; idx(1:this%n_dim) = global2local_bnd(i,lo,hi)
+    idx = 1; idx(1:this%p%n_dim) = global2local_bnd(i,lo,hi)
     n_interior = this%cells(lin_idx)%n_interior
 
     this%cells(i)%A = zero
@@ -3457,12 +3366,11 @@ contains
     this%cells(i)%C = zero
     this%cells(i)%D = zero
     this%cells(i)%LU = zero
-    this%cells(i)%P  = zero
+    this%cells(i)%P = zero
       do jj = 1,n_interior
         j = this%cells(i)%nbor_idx(jj)
-        nbor => this%cells(j)
         call get_face_idx_from_id( idx, this%cells(i)%face_id(jj), dir, face_idx )
-        call this%cells(i)%get_nbor_contribution( nbor, grid%gblock(this%block_num)%grid_vars%face_quads(dir)%p(face_idx(1),face_idx(2),face_idx(3)), term_start, term_end, dA, this%cells(i)%B(1:m,1:m,jj), dD, this%cells(i)%C(1:m,1:n,jj) )
+        call this%cells(i)%get_nbor_contribution( this%cells(j), this%p, grid%gblock(this%block_num)%grid_vars%face_quads(dir)%p(face_idx(1),face_idx(2),face_idx(3)), term_start, term_end, dA, this%cells(i)%B(1:m,1:m,jj), dD, this%cells(i)%C(1:m,1:n,jj) )
         this%cells(i)%A(1:m,1:m) = this%cells(i)%A(1:m,1:m) + dA
         this%cells(i)%D(1:m,1:n) = this%cells(i)%D(1:m,1:n) + dD
     end do
@@ -3610,9 +3518,10 @@ contains
     call this%SOR_iteration( term_start, term_end, n_var, var_idx, omega_, res_init )
     write(*,*) 0, res_init, res_init2
     if (any(res_init < epsilon(one))) then
-      converged_ = .true.
-      if ( present(converged) ) converged = converged_
-      return
+      res_init = one
+      ! converged_ = .true.
+      ! if ( present(converged) ) converged = converged_
+      ! return
     end if
 
     do n = 1,n_iter_
@@ -3677,7 +3586,7 @@ contains
     integer :: n
     do n = 1,this%n_cells_total
       call this%get_cell_LHS( grid, n, term_start, term_end )
-      ! call this%get_cell_RHS( n, term_start, term_end, n_var, var_idx )
+      this%cells(n)%RHS = this%get_cell_RHS( n, term_start, term_end, n_var, var_idx )
     end do
   end subroutine init_cells
 
@@ -3696,7 +3605,7 @@ contains
     tmp_val = zero
     do n = 1,quad%n_quad
       exact = eval_fun( n_var, quad%quad_pts(:,n) )
-      reconstructed = this%cells(lin_idx)%eval( quad%quad_pts(:,n), n_terms, n_var, var_idx )
+      reconstructed = this%cells(lin_idx)%eval( this%p, quad%quad_pts(:,n), n_terms, n_var, var_idx )
       tmp_val(:,n) = abs( reconstructed - exact )
     end do
     if (norm>max_L_norm) then
@@ -3707,6 +3616,48 @@ contains
     end if
     
   end function get_cell_error
+
+  pure function get_error_norm(this,gblock,var_idx,n_terms,norms,eval_fun) result(err_norms)
+    use set_constants, only : zero
+    use index_conversion, only : global2local
+    use grid_derived_type,       only : grid_block
+    use quadrature_derived_type, only : quad_t
+    class(var_rec_block_t),       intent(in) :: this
+    type(grid_block),             intent(in) :: gblock
+    integer, dimension(:),        intent(in) :: var_idx
+    integer,                      intent(in) :: n_terms
+    integer, dimension(:),        intent(in) :: norms
+    procedure(spatial_function)              :: eval_fun
+    real(dp), dimension(size(var_idx),size(norms)) :: err_norms
+    integer, dimension(this%n_dim) :: cell_idx
+    integer, dimension(3) :: tmp_idx
+    integer, parameter :: max_L_norm = 10
+    integer :: n, i, n_var
+    n_var = size(var_idx)
+    err_norms = zero
+    do n = 1,size(norms)
+      if (norms(n)>max_L_norm) then
+        do i = 1,this%n_cells_total
+          cell_idx = global2local(i,gblock%n_cells(1:this%n_dim))
+          tmp_idx = 1
+          tmp_idx(1:this%n_dim) = cell_idx
+          associate( quad => gblock%grid_vars%quad(tmp_idx(1),tmp_idx(2),tmp_idx(3)) )
+            err_norms(:,n) = max( err_norms(:,n), this%get_cell_error( quad, i,n_terms,norms(n),n_var,var_idx,eval_fun) )
+          end associate
+        end do
+      else
+        do i = 1,this%n_cells_total
+          cell_idx = global2local(i,gblock%n_cells(1:this%n_dim))
+          tmp_idx = 1
+          tmp_idx(1:this%n_dim) = cell_idx
+          associate( quad => gblock%grid_vars%quad(tmp_idx(1),tmp_idx(2),tmp_idx(3)) )
+            err_norms(:,n) = err_norms(:,n) + this%get_cell_error( quad, i,n_terms,norms(n),n_var,var_idx,eval_fun)
+          end associate
+        end do
+        err_norms(:,n) = err_norms(:,n) / this%n_cells_total
+      end if
+    end do
+  end function get_error_norm
 
 end module var_rec_block_derived_type
 
@@ -3753,6 +3704,7 @@ contains
   end function test_function_2
 
   subroutine setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
+    use combinatorics, only : nchoosek
     ! use math, only : maximal_extents
     ! use grid_derived_type, only : pack_cell_node_coords
     use grid_derived_type,           only : grid_type
@@ -3765,12 +3717,12 @@ contains
     type(var_rec_block_t),       intent(out) :: rec
     logical :: converged
     integer :: block_num, term_start, term_end
-    integer :: n
+    integer :: n, i
     procedure(spatial_function), pointer :: eval_fun => null()
     ! real(dp), dimension(3,8) :: nodes
     ! real(dp), dimension(n_dim)   :: h_ref
 
-    eval_fun => test_function_1
+    eval_fun => test_function_2
     call grid%setup(1)
     call grid%gblock(1)%setup(n_dim,n_nodes,n_ghost)
     grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
@@ -3781,14 +3733,22 @@ contains
     ! h_ref = maximal_extents( n_dim, 8, nodes(1:n_dim,:) )
     rec = var_rec_block_t( grid, block_num, n_dim, degree, n_vars )
 
-    term_start = 1
-    term_end   = rec%monomial_basis%n_terms
-    call rec%set_cell_avgs(grid%gblock(1),n_vars,[(n,n=1,n_vars)],eval_fun)
-    call rec%init_cells(grid,term_start,term_end,n_vars,[(n,n=1,n_vars)])
-    call rec%solve(term_start,term_end,n_vars,[(n,n=1,n_vars)],omega=1.3_dp,tol=1e-10_dp,n_iter=100,converged=converged)
-    write(*,*) 'converged =', converged
-    ! write(*,*) 'Error: ', rec%get_error_norm() (grid%gblock(1),[1],rec%n_terms,[1,2,huge(1)],eval_fun)
+    ! term_start = 1
+    ! term_end   = rec%p%n_terms
+    ! call rec%set_cell_avgs(grid%gblock(1),n_vars,[(n,n=1,n_vars)],eval_fun)
+    ! call rec%init_cells(grid,term_start,term_end,n_vars,[(n,n=1,n_vars)])
+    ! call rec%solve(term_start,term_end,n_vars,[(n,n=1,n_vars)],omega=1.3_dp,tol=1e-10_dp,n_iter=100,converged=converged)
 
+    call rec%set_cell_avgs(grid%gblock(1),n_vars,[(n,n=1,n_vars)],eval_fun)
+    do i = 1,rec%p%total_degree
+      term_start = 1
+      term_end   = nchoosek( rec%p%n_dim + i, i )
+      write(*,'(A,I0)') "reconstructing: p=",i 
+      call rec%init_cells(grid,term_start,term_end,n_vars,[(n,n=1,n_vars)])
+      call rec%solve(term_start,term_end,n_vars,[(n,n=1,n_vars)],omega=1.3_dp,tol=1e-10_dp,n_iter=20,converged=converged)
+      write(*,*) 'converged =', converged
+      write(*,*) 'Error: ', rec%get_error_norm(grid%gblock(1),[1],term_end,[1,2,huge(1)],eval_fun)
+    end do
     write(*,*) storage_size(rec)
     write(*,*) storage_size(grid)
   end subroutine setup_grid_and_rec
@@ -3811,10 +3771,10 @@ program main
   integer :: degree, n_vars, n_dim
   integer, dimension(3) :: n_nodes, n_ghost
 
-  degree  = 2
+  degree  = 5
   n_vars  = 1
   n_dim   = 3
-  n_nodes = [5,5,5]
+  n_nodes = [10,10,10]
   n_ghost = [2,2,2]
   call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
 
