@@ -3516,21 +3516,18 @@ contains
     end if
     res_init2 = this%residual_norm( term_start, term_end, n_var, var_idx )
     call this%SOR_iteration( term_start, term_end, n_var, var_idx, omega_, res_init )
-    write(*,*) 0, res_init, res_init2
-    if (any(res_init < epsilon(one))) then
-      res_init = one
-      ! converged_ = .true.
-      ! if ( present(converged) ) converged = converged_
-      ! return
-    end if
+    ! write(*,*) 0, res_init, res_init2
+    write(*,*) 0, res_init2
+    where ( res_init2 < epsilon(one) ) res_init2 = one
 
     do n = 1,n_iter_
       call this%SOR_iteration(term_start, term_end, n_var, var_idx, omega_, res_tmp )
       res_tmp = res_tmp / res_init
       res_tmp2  = this%residual_norm( term_start, term_end, n_var, var_idx )
       res_tmp2 = res_tmp2 / res_init2
-      if (n==1 .or. mod(n,1)==0) write(*,*) n, res_tmp, res_tmp2
-      converged_ = all( res_tmp < tol_)
+      ! if (n==1 .or. mod(n,1)==0) write(*,*) n, res_tmp, res_tmp2
+      if (n==1 .or. mod(n,1)==0) write(*,*) n, res_tmp2
+      converged_ = all( res_tmp2 < tol_)
       if ( present(residual ) ) residual(:,n) = res_tmp
       if ( present(converged) ) converged     = converged_
       if ( converged_ ) then
@@ -3585,6 +3582,7 @@ contains
     integer, dimension(:),  intent(in)    :: var_idx
     integer :: n
     do n = 1,this%n_cells_total
+      write(*,'(A,I0,A,I0,A,F5.1,A)') 'initializing cell ',n,'/',this%n_cells_total, ' (', real(n,dp)/real(this%n_cells_total,dp)*100.0_dp, '%)'
       call this%get_cell_LHS( grid, n, term_start, term_end )
       this%cells(n)%RHS = this%get_cell_RHS( n, term_start, term_end, n_var, var_idx )
     end do
@@ -3745,9 +3743,9 @@ contains
       term_end   = nchoosek( rec%p%n_dim + i, i )
       write(*,'(A,I0)') "reconstructing: p=",i 
       call rec%init_cells(grid,term_start,term_end,n_vars,[(n,n=1,n_vars)])
-      call rec%solve(term_start,term_end,n_vars,[(n,n=1,n_vars)],omega=1.3_dp,tol=1e-10_dp,n_iter=20,converged=converged)
+      call rec%solve(term_start,term_end,n_vars,[(n,n=1,n_vars)],omega=1.3_dp,tol=1e-10_dp,n_iter=100,converged=converged)
       write(*,*) 'converged =', converged
-      write(*,*) 'Error: ', rec%get_error_norm(grid%gblock(1),[1],term_end,[1,2,huge(1)],eval_fun)
+      write(*,*) 'Error: ', rec%get_error_norm(grid%gblock(1),[(n,n=1,n_vars)],term_end,[1,2,huge(1)],eval_fun)
     end do
     write(*,*) storage_size(rec)
     write(*,*) storage_size(grid)
@@ -3774,7 +3772,7 @@ program main
   degree  = 5
   n_vars  = 1
   n_dim   = 3
-  n_nodes = [10,10,10]
+  n_nodes = [11,11,11]
   n_ghost = [2,2,2]
   call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
 
