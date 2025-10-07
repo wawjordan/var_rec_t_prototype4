@@ -3279,9 +3279,9 @@ module var_rec_block_derived_type
   end interface var_rec_block_t
 
   abstract interface
-    pure function spatial_function(n_var,x) result(val)
+    pure function spatial_function(n_dim,n_var,x) result(val)
       use set_precision, only : dp
-      integer,                intent(in) :: n_var
+      integer,                intent(in) :: n_dim, n_var
       real(dp), dimension(:), intent(in) :: x
       real(dp), dimension(n_var)         :: val
     end function spatial_function
@@ -3358,7 +3358,7 @@ contains
     n = term_start
     i = lin_idx
     lo = [1,1,1]; hi = grid%gblock(this%block_num)%n_cells
-    idx = 1; idx(1:this%p%n_dim) = global2local_bnd(i,lo,hi)
+    idx = 1; idx(1:this%p%n_dim) = global2local_bnd(i,lo(1:this%p%n_dim),hi(1:this%p%n_dim))
     n_interior = this%cells(lin_idx)%n_interior
 
     this%cells(i)%A = zero
@@ -3517,8 +3517,10 @@ contains
     res_init2 = this%residual_norm( term_start, term_end, n_var, var_idx )
     call this%SOR_iteration( term_start, term_end, n_var, var_idx, omega_, res_init )
     ! write(*,*) 0, res_init, res_init2
-    write(*,*) 0, res_init2
+    ! write(*,*) 0, res_init2
+    call iteration_line('',0,res_init2)
     where ( res_init2 < epsilon(one) ) res_init2 = one
+    where ( res_init  < epsilon(one) ) res_init  = one
 
     do n = 1,n_iter_
       call this%SOR_iteration(term_start, term_end, n_var, var_idx, omega_, res_tmp )
@@ -3526,7 +3528,8 @@ contains
       res_tmp2  = this%residual_norm( term_start, term_end, n_var, var_idx )
       res_tmp2 = res_tmp2 / res_init2
       ! if (n==1 .or. mod(n,1)==0) write(*,*) n, res_tmp, res_tmp2
-      if (n==1 .or. mod(n,1)==0) write(*,*) n, res_tmp2
+      ! if (n==1 .or. mod(n,1)==0) write(*,*) n, res_tmp2
+      if (n==1 .or. mod(n,1)==0) call iteration_line('',n,res_tmp2)
       converged_ = all( res_tmp2 < tol_)
       if ( present(residual ) ) residual(:,n) = res_tmp
       if ( present(converged) ) converged     = converged_
@@ -3536,11 +3539,11 @@ contains
     end do
   end subroutine perform_iterative_reconstruction_SOR
 
-  pure function get_cell_avg(quad,n_var,var_idx,eval_fun) result(avg)
+  pure function get_cell_avg(quad,n_dim,n_var,var_idx,eval_fun) result(avg)
     use set_constants, only : zero
     use quadrature_derived_type, only : quad_t
     type(quad_t),           intent(in) :: quad
-    integer,                intent(in) :: n_var
+    integer,                intent(in) :: n_dim, n_var
     integer,  dimension(:), intent(in) :: var_idx
     procedure(spatial_function)        :: eval_fun
     real(dp), dimension(n_var)         :: avg
@@ -3548,7 +3551,7 @@ contains
     integer :: n
     tmp_val = zero
     do n = 1,quad%n_quad
-      tmp_val(:,n) = eval_fun( n_var, quad%quad_pts(:,n) )
+      tmp_val(:,n) = eval_fun( n_dim, n_var, quad%quad_pts(:,n) )
     end do
     avg = quad%integrate( n_var, tmp_val ) / sum( quad%quad_wts)
   end function get_cell_avg
@@ -3567,12 +3570,52 @@ contains
     tmp_idx = 1
     do i = 1, this%n_cells_total
       tmp_idx(1:this%n_dim) = global2local(i,this%n_cells)
-      tmp_val = get_cell_avg( gblock%grid_vars%quad(tmp_idx(1),tmp_idx(2),tmp_idx(3)), n_var, var_idx, eval_fun )
+      tmp_val = get_cell_avg( gblock%grid_vars%quad(tmp_idx(1),tmp_idx(2),tmp_idx(3)), this%p%n_dim, n_var, var_idx, eval_fun )
       do v = 1,n_var
         this%cells(i)%coefs(1,var_idx(v)) = tmp_val(v)
       end do
     end do
   end subroutine set_cell_avgs
+
+  subroutine update_current_line(string)
+    use iso_fortran_env, only : std_out => output_unit
+    character(*), intent(in) :: string
+    write(std_out,'(A)',advance='no') string
+    flush(std_out)
+  end subroutine update_current_line
+
+  subroutine progress_line(string,n,n_total)
+    character(*), intent(in) :: string
+    integer,      intent(in) :: n, n_total
+    character(*), parameter :: fmt = '(A,I0,A,I0,A,F5.1,A)'
+    character(*), parameter :: carriage_return = achar(13)
+    character(len=100) :: out_string
+    write(out_string,fmt) string, n,'/',n_total, ' (', real(n,dp)/real(n_total,dp)*100.0_dp, '%)'
+    call update_current_line(carriage_return//trim(out_string))
+  end subroutine progress_line
+
+  subroutine iteration_line(string,n,residual)
+    character(*), intent(in) :: string
+    integer,      intent(in) :: n
+    real(dp), dimension(:), intent(in) :: residual
+    character(*), parameter :: fmt1 = '("(A,I0,",I0,"("" "",ES18.12))")'
+    character(*), parameter :: carriage_return = achar(13)
+    character(len=100) :: fmt, out_string
+    write(fmt,fmt1) size(residual)
+    write(out_string,fmt) string, n, residual
+    call update_current_line(carriage_return//trim(out_string))
+  end subroutine iteration_line
+
+  ! subroutine iteration_line(string,n,residual)
+  !   character(*), intent(in) :: string
+  !   integer,      intent(in) :: n
+  !   real(dp), dimension(:), intent(in) :: residual
+  !   character(*) :: fmt1 = '(I0(A,I0,A,I0,A,F5.1,A)'
+  !   character(*), parameter :: carriage_return = achar(13)
+  !   character(len=100) :: out_string
+  !   write(out_string,fmt) carriage_return, string,n,'/',n_total, ' (', real(n,dp)/real(n_total,dp)*100.0_dp, '%)'
+  !   call update_current_line(trim(out_string))
+  ! end subroutine iteration_line
 
   subroutine init_cells(this,grid,term_start,term_end,n_var,var_idx)
     use grid_derived_type, only : grid_type 
@@ -3582,10 +3625,12 @@ contains
     integer, dimension(:),  intent(in)    :: var_idx
     integer :: n
     do n = 1,this%n_cells_total
-      write(*,'(A,I0,A,I0,A,F5.1,A)') 'initializing cell ',n,'/',this%n_cells_total, ' (', real(n,dp)/real(this%n_cells_total,dp)*100.0_dp, '%)'
+      ! write(*,'(A,I0,A,I0,A,F5.1,A)') 'initializing cell ',n,'/',this%n_cells_total, ' (', real(n,dp)/real(this%n_cells_total,dp)*100.0_dp, '%)'
+      call progress_line('initializing cell ',n,this%n_cells_total)
       call this%get_cell_LHS( grid, n, term_start, term_end )
       this%cells(n)%RHS = this%get_cell_RHS( n, term_start, term_end, n_var, var_idx )
     end do
+    write(*,*)
   end subroutine init_cells
 
   pure function get_cell_error( this, quad, lin_idx, n_terms, norm, n_var, var_idx, eval_fun ) result(err)
@@ -3602,7 +3647,7 @@ contains
     integer :: n
     tmp_val = zero
     do n = 1,quad%n_quad
-      exact = eval_fun( n_var, quad%quad_pts(:,n) )
+      exact = eval_fun( this%p%n_dim, n_var, quad%quad_pts(:,n) )
       reconstructed = this%cells(lin_idx)%eval( this%p, quad%quad_pts(:,n), n_terms, n_var, var_idx )
       tmp_val(:,n) = abs( reconstructed - exact )
     end do
@@ -3652,7 +3697,7 @@ contains
             err_norms(:,n) = err_norms(:,n) + this%get_cell_error( quad, i,n_terms,norms(n),n_var,var_idx,eval_fun)
           end associate
         end do
-        err_norms(:,n) = err_norms(:,n) / this%n_cells_total
+        err_norms(:,n) = err_norms(:,n) / real( this%n_cells_total, dp )
       end if
     end do
   end function get_error_norm
@@ -3684,20 +3729,26 @@ module test_problem
   public :: test_function_1, test_function_2
 contains
 
-  pure function test_function_1(n_var,x) result(val)
-    integer,                intent(in) :: n_var
+  pure function test_function_1(n_dim,n_var,x) result(val)
+    integer,                intent(in) :: n_dim, n_var
     real(dp), dimension(:), intent(in) :: x
     real(dp), dimension(n_var)         :: val
-
     val(1) = 999.0_dp * x(1) - 888.0_dp * x(2) + 777.0_dp * x(3) - 666.0_dp
+    val(:) = val(1)
   end function test_function_1
 
-  pure function test_function_2(n_var,x) result(val)
+  pure function test_function_2(n_dim,n_var,x) result(val)
   use set_constants, only : pi
-    integer,                intent(in) :: n_var
+    integer,                intent(in) :: n_dim, n_var
     real(dp), dimension(:), intent(in) :: x
     real(dp), dimension(n_var)         :: val
-    val(1) = sin(pi*x(1)) * sin(pi*x(2)) * sin(pi*x(3))
+    integer :: i
+    val(1) = sin(pi*x(1))
+    do i = 2,n_dim
+      val(1) = val(1)*sin(pi*x(i))
+    end do
+    val(:) = val(1)
+    ! val(1) = sin(pi*x(1)) * sin(pi*x(2)) * sin(pi*x(3))
     ! val(1) = sin(pi*x(1)) * sin(pi*x(2))
   end function test_function_2
 
@@ -3715,7 +3766,8 @@ contains
     type(var_rec_block_t),       intent(out) :: rec
     logical :: converged
     integer :: block_num, term_start, term_end
-    integer :: n, i
+    integer :: n, i, v
+    real(dp), dimension(n_vars, 3) :: error_norms
     procedure(spatial_function), pointer :: eval_fun => null()
     ! real(dp), dimension(3,8) :: nodes
     ! real(dp), dimension(n_dim)   :: h_ref
@@ -3745,10 +3797,12 @@ contains
       call rec%init_cells(grid,term_start,term_end,n_vars,[(n,n=1,n_vars)])
       call rec%solve(term_start,term_end,n_vars,[(n,n=1,n_vars)],omega=1.3_dp,tol=1e-10_dp,n_iter=100,converged=converged)
       write(*,*) 'converged =', converged
-      write(*,*) 'Error: ', rec%get_error_norm(grid%gblock(1),[(n,n=1,n_vars)],term_end,[1,2,huge(1)],eval_fun)
+      error_norms = rec%get_error_norm(grid%gblock(1),[(n,n=1,n_vars)],term_end,[1,2,huge(1)],eval_fun)
+      write(*,*) 'Error: '
+      do v = 1,n_vars
+        write(*,'(I0,3(" ",ES18.12))') v, (error_norms(v,n), n = 1,3)
+      end do
     end do
-    write(*,*) storage_size(rec)
-    write(*,*) storage_size(grid)
   end subroutine setup_grid_and_rec
 
 end module test_problem
@@ -3769,15 +3823,14 @@ program main
   integer :: degree, n_vars, n_dim
   integer, dimension(3) :: n_nodes, n_ghost
 
-  degree  = 5
+  degree  = 4
   n_vars  = 1
-  n_dim   = 3
-  n_nodes = [11,11,11]
-  n_ghost = [2,2,2]
+  n_dim   = 2
+  n_nodes = [257,257,2]
+  n_ghost = [2,2,0]
+  call timer%tic()
   call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
-
-  write(*,*) 'Here'
-  
+  write(*,*) 'Elapsed time: ', timer%toc()
   call rec%destroy()
   call grid%destroy()
 end program main
