@@ -3720,6 +3720,144 @@ end module var_rec_block_derived_type
 ! contains
 
 ! end module var_rec_derived_type
+module function_holder_type
+  use set_precision, only : dp
+  implicit none
+  private
+  public :: func_h_t
+
+  type, abstract :: func_h_t
+    integer :: n_eq
+    integer :: n_dim
+  contains
+    procedure :: initialize_super
+    procedure(eval_i),    public, deferred :: eval
+    procedure(destroy_i), public, deferred :: destroy
+  end type func_h_t
+
+  abstract interface
+    pure function eval_i( this, x, t ) result(q)
+      use set_precision,  only : dp
+      import func_h_t
+      class(func_h_t),        intent(in) :: this
+      real(dp), dimension(:), intent(in) :: x
+      real(dp), optional,     intent(in) :: t
+      real(dp), dimension(this%neq)      :: q
+    end function eval_i
+
+    pure elemental subroutine destroy_i(this)
+      import func_h_t
+      class(func_h_t), intent(inout) :: this
+    end subroutine destroy_i
+  end interface
+
+contains
+  subroutine initialize_super( this, n_eq, n_dim )
+    class(ms_t),  intent(inout) :: this
+    integer,      intent(in)    :: n_eq, n_dim
+    this%n_eq     = n_eq
+    this%n_dim    = n_dim
+  end subroutine initialize_super
+end module function_holder_type
+module cross_term_sinusoid
+  use set_precision, only : dp
+  use function_holder_type, only : func_h_t
+  use monomial_basis_derived_type, only : monomial_basis_t
+  implicit none
+  private
+  public :: cts_t
+
+  type, extends(func_h_t) :: cts_t
+    real(dp) :: t0
+    real(dp), dimension(:),   allocatable :: l, a, e
+    real(dp), dimension(:,:), allocatable :: b, c, d
+    type(monomial_basis_t)                :: mono
+  contains
+    procedure :: eval    => eval_cts
+    procedure :: destroy => destroy_cts
+  end type cts_t
+
+  interface cts_t
+    procedure constructor
+  end interface cts_t
+contains
+  function constructor(n_dim,n_eq,mean,space_coefs,time_coefs,length_scale,time_scale,rand_coefs) result(this)
+    use set_constants, only : zero, one, two, pi
+    use combinatorics, only : nchoosek
+
+    integer,                                                       intent(in) :: n_dim, n_eq
+    real(dp), dimension(n_eq),                           optional, intent(in) :: mean
+    real(dp), dimension(n_eq,3*nchoosek(2*n_dim,n_dim)), optional, intent(in) :: space_coefs
+    real(dp), dimension(n_eq,3),                         optional, intent(in) :: time_coefs
+    real(dp), dimension(n_eq),                           optional, intent(in) :: length_scale
+    real(dp),                                            optional, intent(in) :: time_scale
+    logical,                                             optional, intent(in) :: rand_coefs
+    type(cts_t)                                                               :: this
+    integer :: total_degree, n_terms
+
+    call this%destroy()
+    this%n_dim = n_dim
+    this%n_eq  = n_eq
+    total_degree = n_dim
+    this%mono = monomial_basis_t(total_degree,n_dim)
+    n_terms = this%mono%n_terms
+
+    allocate( this%l(n_dim) )
+    allocate( this%a(neq) )
+    allocate( this%b(neq,n_terms) )
+    allocate( this%c(neq,n_terms) )
+    allocate( this%d(neq,n_terms) )
+    allocate( this%e(neq) )
+    
+    this%l = one
+    this%t0 = one
+    this%a = zero
+    this%b = one
+    this%c = one
+    this%d = one
+    this%e = zero
+
+    if (present(rand_coefs) ) then
+      call random_init(.true.,.false.)
+      call random_number(this%a); this%a = two*this%a - one
+      call random_number(this%b); this%a = two*this%a - one
+      call random_number(this%c); this%a = two*this%a - one
+      call random_number(this%d); this%a = two*this%a - one
+      call random_number(this%e); this%a = two*this%a - one
+    else
+      if (present(mean)) this%a = mean
+      if (present(space_coefs)) then
+        cnt = 0
+        do n = 1,n_terms
+          cnt = cnt + 1
+          this%b(:,n) = space_coefs(:,cnt)
+        end do
+        do n = 1,n_terms
+          cnt = cnt + 1
+          this%c(:,n) = space_coefs(:,cnt)
+        end do
+        do n = 1,n_terms
+          cnt = cnt + 1
+          this%d(:,n) = space_coefs(:,cnt)
+        end do
+      end if
+      if (present(time_coefs)) this%e = time_coefs
+      if (present(length_scale) ) this%l = length_scale
+      if (present(time_scale)) this%t0 = time_scale
+    end if
+  end function constructor
+
+  pure elemental subroutine destroy_cts(this)
+    class(cts_t), intent(inout) :: this
+    if ( allocated(this%l)    ) deallocate( this%l    )
+    if ( allocated(this%a)    ) deallocate( this%a    )
+    if ( allocated(this%b)    ) deallocate( this%b    )
+    if ( allocated(this%c)    ) deallocate( this%c    )
+    if ( allocated(this%d)    ) deallocate( this%d    )
+    if ( allocated(this%e)    ) deallocate( this%e    )
+    call this%m%destroy()
+  end subroutine destroy_cts
+end module cross_term_sinusoid
 
 module test_problem
   use set_precision, only : dp
