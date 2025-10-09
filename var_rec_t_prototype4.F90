@@ -3742,7 +3742,7 @@ module function_holder_type
       class(func_h_t),        intent(in) :: this
       real(dp), dimension(:), intent(in) :: x
       real(dp), optional,     intent(in) :: t
-      real(dp), dimension(this%neq)      :: q
+      real(dp), dimension(this%n_eq)     :: q
     end function eval_i
 
     pure elemental subroutine destroy_i(this)
@@ -3753,7 +3753,7 @@ module function_holder_type
 
 contains
   subroutine initialize_super( this, n_eq, n_dim )
-    class(ms_t),  intent(inout) :: this
+    class(func_h_t),  intent(inout) :: this
     integer,      intent(in)    :: n_eq, n_dim
     this%n_eq     = n_eq
     this%n_dim    = n_dim
@@ -3793,6 +3793,7 @@ contains
     real(dp),                                            optional, intent(in) :: time_scale
     logical,                                             optional, intent(in) :: rand_coefs
     type(cts_t)                                                               :: this
+    integer :: n, cnt
     integer :: total_degree, n_terms
 
     call this%destroy()
@@ -3803,11 +3804,11 @@ contains
     n_terms = this%mono%n_terms
 
     allocate( this%l(n_dim) )
-    allocate( this%a(neq) )
-    allocate( this%b(neq,n_terms) )
-    allocate( this%c(neq,n_terms) )
-    allocate( this%d(neq,n_terms) )
-    allocate( this%e(neq) )
+    allocate( this%a(n_eq) )
+    allocate( this%b(n_eq,n_terms) )
+    allocate( this%c(n_eq,n_terms) )
+    allocate( this%d(n_eq,n_terms) )
+    allocate( this%e(n_eq) )
     
     this%l = one
     this%t0 = one
@@ -3841,9 +3842,9 @@ contains
           this%d(:,n) = space_coefs(:,cnt)
         end do
       end if
-      if (present(time_coefs)) this%e = time_coefs
-      if (present(length_scale) ) this%l = length_scale
-      if (present(time_scale)) this%t0 = time_scale
+      if (present(time_coefs)   ) this%e  = time_coefs
+      if (present(length_scale) ) this%l  = length_scale
+      if (present(time_scale)   ) this%t0 = time_scale
     end if
   end function constructor
 
@@ -3855,8 +3856,16 @@ contains
     if ( allocated(this%c)    ) deallocate( this%c    )
     if ( allocated(this%d)    ) deallocate( this%d    )
     if ( allocated(this%e)    ) deallocate( this%e    )
-    call this%m%destroy()
+    call this%mono%destroy()
   end subroutine destroy_cts
+
+  pure function eval_cts( this, x, t ) result(q)
+      use set_precision,  only : dp
+      class(cts_t),        intent(in) :: this
+      real(dp), dimension(:), intent(in) :: x
+      real(dp), optional,     intent(in) :: t
+      real(dp), dimension(this%n_eq)     :: q
+    end function eval_cts
 end module cross_term_sinusoid
 
 module test_problem
