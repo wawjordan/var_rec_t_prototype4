@@ -13,7 +13,8 @@ module set_constants
   implicit none
   private
   public :: zero, one, two, three, four
-  public :: half, third, fourth, large, pi
+  public :: half, third, fourth
+  public :: pi, large, near_zero
   real(dp), parameter :: zero      = 0.0_dp
   real(dp), parameter :: one       = 1.0_dp
   real(dp), parameter :: two       = 2.0_dp
@@ -24,6 +25,7 @@ module set_constants
   real(dp), parameter :: half      = 0.50_dp
   real(dp), parameter :: large  = huge(one)
   real(dp), parameter :: pi     = acos(-one)
+  real(dp), parameter :: near_zero = epsilon(one)
 end module set_constants
 
 module project_inputs
@@ -2896,6 +2898,220 @@ contains
 
 end module monomial_basis_derived_type
 
+module function_holder_type
+  use set_precision, only : dp
+  implicit none
+  private
+  public :: func_h_t
+
+  type, abstract :: func_h_t
+    integer :: n_eq
+    integer :: n_dim
+  contains
+    procedure :: initialize_super
+    procedure, pass :: test_eval
+    procedure(eval_i),    public, deferred :: eval
+    procedure(destroy_i), public, deferred :: destroy
+  end type func_h_t
+
+  abstract interface
+    pure function eval_i( this, x, t ) result(q)
+      use set_precision,  only : dp
+      import func_h_t
+      class(func_h_t),        intent(in) :: this
+      real(dp), dimension(:), intent(in) :: x
+      real(dp), optional,     intent(in) :: t
+      real(dp), dimension(this%n_eq)     :: q
+    end function eval_i
+
+    pure elemental subroutine destroy_i(this)
+      import func_h_t
+      class(func_h_t), intent(inout) :: this
+    end subroutine destroy_i
+  end interface
+
+contains
+  subroutine initialize_super( this, n_eq, n_dim )
+    class(func_h_t),  intent(inout) :: this
+    integer,      intent(in)    :: n_eq, n_dim
+    this%n_eq     = n_eq
+    this%n_dim    = n_dim
+  end subroutine initialize_super
+
+  pure function test_eval( this, n_dim, n_var, x ) result(val)
+    use set_constants, only : zero
+    class(func_h_t),        intent(in) :: this
+    integer,                intent(in) :: n_dim, n_var
+    real(dp), dimension(:), intent(in) :: x
+    real(dp), dimension(n_var)         :: val
+    real(dp), dimension(this%n_eq)     :: tmp_val
+    integer :: sz, i
+    sz = min(n_var,this%n_eq)
+    tmp_val = this%eval(x)
+    val = zero
+    do i = 1,sz
+      val(i) = tmp_val(i)
+    end do
+  end function test_eval
+
+end module function_holder_type
+
+module cross_term_sinusoid
+  use set_precision, only : dp
+  use function_holder_type, only : func_h_t
+  use monomial_basis_derived_type, only : monomial_basis_t
+  implicit none
+  private
+  public :: cts_t
+
+  type, extends(func_h_t) :: cts_t
+    real(dp), dimension(:),   allocatable :: dt, t0, a, e, f, g
+    real(dp), dimension(:,:), allocatable :: dx, x0, b, c, d
+    type(monomial_basis_t)                :: mono
+  contains
+    procedure :: eval    => eval_cts
+    procedure :: destroy => destroy_cts
+  end type cts_t
+
+  interface cts_t
+    procedure constructor
+  end interface cts_t
+contains
+  function constructor(n_dim,n_eq,mean,space_coefs,space_scale,space_origin,time_coefs,time_scale,time_origin,rand_coefs) result(this)
+    use set_constants, only : zero, one, two, pi, near_zero
+    use combinatorics, only : nchoosek
+
+    integer,                                                       intent(in) :: n_dim, n_eq
+    real(dp), dimension(n_eq),                           optional, intent(in) :: mean
+    real(dp), dimension(n_eq,3*nchoosek(2*n_dim,n_dim)), optional, intent(in) :: space_coefs
+    real(dp), dimension(n_dim,n_eq),                     optional, intent(in) :: space_scale
+    real(dp), dimension(n_dim,n_eq),                     optional, intent(in) :: space_origin
+    real(dp), dimension(n_eq,3),                         optional, intent(in) :: time_coefs
+    real(dp), dimension(n_eq),                           optional, intent(in) :: time_scale
+    real(dp), dimension(n_eq),                           optional, intent(in) :: time_origin
+    logical,                                             optional, intent(in) :: rand_coefs
+    type(cts_t)                                                               :: this
+    integer :: n, cnt
+    integer :: total_degree, n_terms
+
+    call this%destroy()
+    this%n_dim = n_dim
+    this%n_eq  = n_eq
+    total_degree = n_dim
+    this%mono = monomial_basis_t(total_degree,n_dim)
+    n_terms = this%mono%n_terms
+
+    allocate( this%dt(n_eq) )
+    allocate( this%t0(n_eq) )
+    allocate( this%dx(n_dim,n_eq) )
+    allocate( this%x0(n_dim,n_eq) )
+    allocate( this%a(n_eq) )
+    allocate( this%b(n_eq,n_terms) )
+    allocate( this%c(n_eq,n_terms) )
+    allocate( this%d(n_eq,n_terms) )
+    allocate( this%e(n_eq) )
+    allocate( this%f(n_eq) )
+    allocate( this%g(n_eq) )
+    
+    this%dt = one
+    this%dx = one
+    this%t0 = zero
+    this%x0 = zero
+    this%a  = zero
+    this%b  = one
+    this%c  = one
+    this%d  = one
+    this%e  = one
+    this%f  = one
+    this%g  = one
+
+    if (present(rand_coefs) ) then
+      call random_init(.true.,.false.)
+      call random_number(this%a); this%a = two*this%a - one
+      call random_number(this%b); this%b = two*this%b - one
+      call random_number(this%c); this%c = two*this%c - one
+      call random_number(this%d); this%d = two*this%d - one
+      call random_number(this%e); this%e = two*this%e - one
+      call random_number(this%f); this%f = two*this%f - one
+      call random_number(this%g); this%g = two*this%g - one
+    else
+      if (present(mean)) this%a = mean
+      if (present(space_coefs)) then
+        cnt = 0
+        do n = 1,n_terms
+          cnt = cnt + 1
+          this%b(:,n) = space_coefs(:,cnt)
+        end do
+        do n = 1,n_terms
+          cnt = cnt + 1
+          this%c(:,n) = space_coefs(:,cnt)
+        end do
+        do n = 1,n_terms
+          cnt = cnt + 1
+          this%d(:,n) = space_coefs(:,cnt)
+        end do
+      end if
+      if ( present(space_scale) ) then
+        this%dx = sign(one,space_scale) * max(near_zero,abs(space_scale))
+      end if
+      if ( present(space_origin) ) this%x0 = space_origin
+      if ( present(time_coefs)   ) then
+        this%e  = time_coefs(:,1)
+        this%f  = time_coefs(:,2)
+        this%g  = time_coefs(:,3)
+      end if
+      if ( present(time_scale) ) then
+        this%dt = sign(one,time_scale) * max(near_zero,abs(time_scale))
+      end if
+      if ( present(time_origin) ) this%t0 = time_origin
+    end if
+  end function constructor
+
+  pure elemental subroutine destroy_cts(this)
+    class(cts_t), intent(inout) :: this
+    if ( allocated(this%dt)   ) deallocate( this%dt   )
+    if ( allocated(this%dx)   ) deallocate( this%dx   )
+    if ( allocated(this%t0)   ) deallocate( this%t0   )
+    if ( allocated(this%x0)   ) deallocate( this%x0   )
+    if ( allocated(this%a)    ) deallocate( this%a    )
+    if ( allocated(this%b)    ) deallocate( this%b    )
+    if ( allocated(this%c)    ) deallocate( this%c    )
+    if ( allocated(this%d)    ) deallocate( this%d    )
+    if ( allocated(this%e)    ) deallocate( this%e    )
+    if ( allocated(this%f)    ) deallocate( this%f    )
+    if ( allocated(this%g)    ) deallocate( this%g    )
+    call this%mono%destroy()
+  end subroutine destroy_cts
+
+  pure function eval_cts( this, x, t ) result(q)
+    class(cts_t),        intent(in) :: this
+    real(dp), dimension(:), intent(in) :: x
+    real(dp), optional,     intent(in) :: t
+    real(dp), dimension(this%n_eq)     :: q
+    real(dp), dimension(this%n_dim,this%n_eq) :: x_bar
+    real(dp), dimension(this%n_eq)            :: t_bar
+    real(dp) :: tmp_val
+    integer :: coef, i, n
+      do i = 1,this%n_eq
+        x_bar(:,i) = (x(1:this%n_dim) - this%x0(:,i)) / this%dx(:,i)
+      end do
+      q = this%a
+      do n = 1,this%mono%n_terms
+        do i = 1,this%n_eq
+          call this%mono%eval(n,x_bar(:,i),tmp_val,coef)
+          q(i) = q(i) + this%b(i,n) * sin( this%c(i,n) * tmp_val + this%d(i,n) )
+        end do
+      end do
+      if ( present(t) ) then
+        t_bar = ( t - this%t0 ) / this%dt
+        do i = 1,this%n_eq
+          q(i) = q(i) + this%e(i) * sin( this%f(i) * t_bar(i) + this%g(i) )
+        end do
+      end if
+    end function eval_cts
+
+end module cross_term_sinusoid
+
 module zero_mean_basis_derived_type
   use set_precision, only : dp
   use quadrature_derived_type, only : quad_t
@@ -3256,7 +3472,7 @@ module var_rec_block_derived_type
   implicit none
   private
   public :: var_rec_block_t
-  public :: spatial_function
+  ! public :: spatial_function
   type :: var_rec_block_t
     private
     integer, public                                 :: block_num, n_dim, degree, n_vars, n_cells_total
@@ -3278,14 +3494,14 @@ module var_rec_block_derived_type
     module procedure constructor
   end interface var_rec_block_t
 
-  abstract interface
-    pure function spatial_function(n_dim,n_var,x) result(val)
-      use set_precision, only : dp
-      integer,                intent(in) :: n_dim, n_var
-      real(dp), dimension(:), intent(in) :: x
-      real(dp), dimension(n_var)         :: val
-    end function spatial_function
-  end interface
+  ! abstract interface
+  !   pure function spatial_function(n_dim,n_var,x) result(val)
+  !     use set_precision, only : dp
+  !     integer,                intent(in) :: n_dim, n_var
+  !     real(dp), dimension(:), intent(in) :: x
+  !     real(dp), dimension(n_var)         :: val
+  !   end function spatial_function
+  ! end interface
 
 contains
 
@@ -3542,16 +3758,18 @@ contains
   pure function get_cell_avg(quad,n_dim,n_var,var_idx,eval_fun) result(avg)
     use set_constants, only : zero
     use quadrature_derived_type, only : quad_t
+    use function_holder_type,    only : func_h_t
     type(quad_t),           intent(in) :: quad
     integer,                intent(in) :: n_dim, n_var
     integer,  dimension(:), intent(in) :: var_idx
-    procedure(spatial_function)        :: eval_fun
+    class(func_h_t),        intent(in) :: eval_fun
     real(dp), dimension(n_var)         :: avg
     real(dp), dimension(n_var,quad%n_quad) :: tmp_val
     integer :: n
     tmp_val = zero
     do n = 1,quad%n_quad
-      tmp_val(:,n) = eval_fun( n_dim, n_var, quad%quad_pts(:,n) )
+      ! tmp_val(:,n) = eval_fun( n_dim, n_var, quad%quad_pts(:,n) )
+      tmp_val(:,n) = eval_fun%test_eval( n_dim, n_var, quad%quad_pts(:,n) )
     end do
     avg = quad%integrate( n_var, tmp_val ) / sum( quad%quad_wts)
   end function get_cell_avg
@@ -3559,11 +3777,13 @@ contains
   pure subroutine set_cell_avgs(this,gblock,n_var,var_idx,eval_fun)
     use grid_derived_type,       only : grid_block
     use index_conversion,        only : global2local
+    use function_holder_type,    only : func_h_t
     class(var_rec_block_t), intent(inout) :: this
     type(grid_block),       intent(in)    :: gblock
     integer,                intent(in)    :: n_var
     integer,  dimension(:), intent(in)    :: var_idx
-    procedure(spatial_function)           :: eval_fun
+    ! procedure(spatial_function)           :: eval_fun
+    class(func_h_t),        intent(in)    :: eval_fun
     real(dp), dimension(n_var) :: tmp_val
     integer,  dimension(3)     :: tmp_idx
     integer :: i, v
@@ -3634,20 +3854,23 @@ contains
   end subroutine init_cells
 
   pure function get_cell_error( this, quad, lin_idx, n_terms, norm, n_var, var_idx, eval_fun ) result(err)
-    use set_constants, only : zero, one
+    use set_constants,           only : zero, one
     use quadrature_derived_type, only : quad_t
+    use function_holder_type,    only : func_h_t
     class(var_rec_block_t), intent(in) :: this
     type(quad_t),           intent(in) :: quad
     integer,                intent(in) :: lin_idx, n_terms, norm, n_var
     integer, dimension(:),  intent(in) :: var_idx
-    procedure(spatial_function)        :: eval_fun
+    class(func_h_t),        intent(in)    :: eval_fun
+    ! procedure(spatial_function)        :: eval_fun
     real(dp), dimension(n_var) :: reconstructed, exact, err
     real(dp), dimension(n_var,quad%n_quad) :: tmp_val
     integer, parameter :: max_L_norm = 10
     integer :: n
     tmp_val = zero
     do n = 1,quad%n_quad
-      exact = eval_fun( this%p%n_dim, n_var, quad%quad_pts(:,n) )
+      ! exact = eval_fun( this%p%n_dim, n_var, quad%quad_pts(:,n) )
+      exact = eval_fun%test_eval( this%p%n_dim, n_var, quad%quad_pts(:,n) )
       reconstructed = this%cells(lin_idx)%eval( this%p, quad%quad_pts(:,n), n_terms, n_var, var_idx )
       tmp_val(:,n) = abs( reconstructed - exact )
     end do
@@ -3661,16 +3884,18 @@ contains
   end function get_cell_error
 
   pure function get_error_norm(this,gblock,var_idx,n_terms,norms,eval_fun) result(err_norms)
-    use set_constants, only : zero
-    use index_conversion, only : global2local
+    use set_constants,           only : zero
+    use index_conversion,        only : global2local
     use grid_derived_type,       only : grid_block
     use quadrature_derived_type, only : quad_t
+    use function_holder_type,    only : func_h_t
     class(var_rec_block_t),       intent(in) :: this
     type(grid_block),             intent(in) :: gblock
     integer, dimension(:),        intent(in) :: var_idx
     integer,                      intent(in) :: n_terms
     integer, dimension(:),        intent(in) :: norms
-    procedure(spatial_function)              :: eval_fun
+    class(func_h_t),              intent(in) :: eval_fun
+    ! procedure(spatial_function)              :: eval_fun
     real(dp), dimension(size(var_idx),size(norms)) :: err_norms
     integer, dimension(this%n_dim) :: cell_idx
     integer, dimension(3) :: tmp_idx
@@ -3703,170 +3928,6 @@ contains
   end function get_error_norm
 
 end module var_rec_block_derived_type
-
-! module var_rec_derived_type
-!   use set_precision, only : dp
-!   use var_rec_block_derived_type, only : var_rec_block_t
-!   implicit none
-
-!   private
-
-!   public :: var_rec_t
-!   type var_rec_t
-!     integer :: n_blocks
-!     integer :: 
-!   end type var_rec_t
-
-! contains
-
-! end module var_rec_derived_type
-module function_holder_type
-  use set_precision, only : dp
-  implicit none
-  private
-  public :: func_h_t
-
-  type, abstract :: func_h_t
-    integer :: n_eq
-    integer :: n_dim
-  contains
-    procedure :: initialize_super
-    procedure(eval_i),    public, deferred :: eval
-    procedure(destroy_i), public, deferred :: destroy
-  end type func_h_t
-
-  abstract interface
-    pure function eval_i( this, x, t ) result(q)
-      use set_precision,  only : dp
-      import func_h_t
-      class(func_h_t),        intent(in) :: this
-      real(dp), dimension(:), intent(in) :: x
-      real(dp), optional,     intent(in) :: t
-      real(dp), dimension(this%n_eq)     :: q
-    end function eval_i
-
-    pure elemental subroutine destroy_i(this)
-      import func_h_t
-      class(func_h_t), intent(inout) :: this
-    end subroutine destroy_i
-  end interface
-
-contains
-  subroutine initialize_super( this, n_eq, n_dim )
-    class(func_h_t),  intent(inout) :: this
-    integer,      intent(in)    :: n_eq, n_dim
-    this%n_eq     = n_eq
-    this%n_dim    = n_dim
-  end subroutine initialize_super
-end module function_holder_type
-module cross_term_sinusoid
-  use set_precision, only : dp
-  use function_holder_type, only : func_h_t
-  use monomial_basis_derived_type, only : monomial_basis_t
-  implicit none
-  private
-  public :: cts_t
-
-  type, extends(func_h_t) :: cts_t
-    real(dp) :: t0
-    real(dp), dimension(:),   allocatable :: l, a, e
-    real(dp), dimension(:,:), allocatable :: b, c, d
-    type(monomial_basis_t)                :: mono
-  contains
-    procedure :: eval    => eval_cts
-    procedure :: destroy => destroy_cts
-  end type cts_t
-
-  interface cts_t
-    procedure constructor
-  end interface cts_t
-contains
-  function constructor(n_dim,n_eq,mean,space_coefs,time_coefs,length_scale,time_scale,rand_coefs) result(this)
-    use set_constants, only : zero, one, two, pi
-    use combinatorics, only : nchoosek
-
-    integer,                                                       intent(in) :: n_dim, n_eq
-    real(dp), dimension(n_eq),                           optional, intent(in) :: mean
-    real(dp), dimension(n_eq,3*nchoosek(2*n_dim,n_dim)), optional, intent(in) :: space_coefs
-    real(dp), dimension(n_eq,3),                         optional, intent(in) :: time_coefs
-    real(dp), dimension(n_eq),                           optional, intent(in) :: length_scale
-    real(dp),                                            optional, intent(in) :: time_scale
-    logical,                                             optional, intent(in) :: rand_coefs
-    type(cts_t)                                                               :: this
-    integer :: n, cnt
-    integer :: total_degree, n_terms
-
-    call this%destroy()
-    this%n_dim = n_dim
-    this%n_eq  = n_eq
-    total_degree = n_dim
-    this%mono = monomial_basis_t(total_degree,n_dim)
-    n_terms = this%mono%n_terms
-
-    allocate( this%l(n_dim) )
-    allocate( this%a(n_eq) )
-    allocate( this%b(n_eq,n_terms) )
-    allocate( this%c(n_eq,n_terms) )
-    allocate( this%d(n_eq,n_terms) )
-    allocate( this%e(n_eq) )
-    
-    this%l = one
-    this%t0 = one
-    this%a = zero
-    this%b = one
-    this%c = one
-    this%d = one
-    this%e = zero
-
-    if (present(rand_coefs) ) then
-      call random_init(.true.,.false.)
-      call random_number(this%a); this%a = two*this%a - one
-      call random_number(this%b); this%a = two*this%a - one
-      call random_number(this%c); this%a = two*this%a - one
-      call random_number(this%d); this%a = two*this%a - one
-      call random_number(this%e); this%a = two*this%a - one
-    else
-      if (present(mean)) this%a = mean
-      if (present(space_coefs)) then
-        cnt = 0
-        do n = 1,n_terms
-          cnt = cnt + 1
-          this%b(:,n) = space_coefs(:,cnt)
-        end do
-        do n = 1,n_terms
-          cnt = cnt + 1
-          this%c(:,n) = space_coefs(:,cnt)
-        end do
-        do n = 1,n_terms
-          cnt = cnt + 1
-          this%d(:,n) = space_coefs(:,cnt)
-        end do
-      end if
-      if (present(time_coefs)   ) this%e  = time_coefs
-      if (present(length_scale) ) this%l  = length_scale
-      if (present(time_scale)   ) this%t0 = time_scale
-    end if
-  end function constructor
-
-  pure elemental subroutine destroy_cts(this)
-    class(cts_t), intent(inout) :: this
-    if ( allocated(this%l)    ) deallocate( this%l    )
-    if ( allocated(this%a)    ) deallocate( this%a    )
-    if ( allocated(this%b)    ) deallocate( this%b    )
-    if ( allocated(this%c)    ) deallocate( this%c    )
-    if ( allocated(this%d)    ) deallocate( this%d    )
-    if ( allocated(this%e)    ) deallocate( this%e    )
-    call this%mono%destroy()
-  end subroutine destroy_cts
-
-  pure function eval_cts( this, x, t ) result(q)
-      use set_precision,  only : dp
-      class(cts_t),        intent(in) :: this
-      real(dp), dimension(:), intent(in) :: x
-      real(dp), optional,     intent(in) :: t
-      real(dp), dimension(this%n_eq)     :: q
-    end function eval_cts
-end module cross_term_sinusoid
 
 module test_problem
   use set_precision, only : dp
@@ -3904,9 +3965,11 @@ contains
     ! use math, only : maximal_extents
     ! use grid_derived_type, only : pack_cell_node_coords
     use grid_derived_type,           only : grid_type
-    use var_rec_block_derived_type,  only : var_rec_block_t, spatial_function 
+    use var_rec_block_derived_type,  only : var_rec_block_t
+    ! use var_rec_block_derived_type,  only : spatial_function 
     use monomial_basis_derived_type, only : monomial_basis_t
     use linspace_helper,             only : unit_cartesian_mesh_cat
+    use cross_term_sinusoid,         only : cts_t
     integer,                     intent(in)  :: n_dim, n_vars, degree
     integer, dimension(3),       intent(in)  :: n_nodes, n_ghost
     type(grid_type),             intent(out) :: grid
@@ -3915,11 +3978,14 @@ contains
     integer :: block_num, term_start, term_end
     integer :: n, i, v
     real(dp), dimension(n_vars, 3) :: error_norms
-    procedure(spatial_function), pointer :: eval_fun => null()
+    ! procedure(spatial_function), pointer :: eval_fun => null()
+    type(cts_t) :: eval_fun
     ! real(dp), dimension(3,8) :: nodes
     ! real(dp), dimension(n_dim)   :: h_ref
 
-    eval_fun => test_function_2
+    ! eval_fun => test_function_2
+
+    eval_fun = cts_t(n_dim,n_vars,rand_coefs=.true.)
     call grid%setup(1)
     call grid%gblock(1)%setup(n_dim,n_nodes,n_ghost)
     grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
@@ -3973,7 +4039,7 @@ program main
   degree  = 4
   n_vars  = 1
   n_dim   = 2
-  n_nodes = [257,257,2]
+  n_nodes = [65,65,2]
   n_ghost = [2,2,0]
   call timer%tic()
   call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
