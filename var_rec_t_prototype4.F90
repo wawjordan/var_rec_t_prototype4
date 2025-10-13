@@ -1482,6 +1482,7 @@ module linspace_helper
   use set_precision, only : dp
   private
   public :: unit_cartesian_mesh_cat
+  public :: unit_cartesian_mesh_cat_perturbed
   public :: linspace, meshgrid2, meshgrid3
 contains
   pure function unit_cartesian_mesh_cat(nx,ny,nz) result(xyz)
@@ -1502,6 +1503,38 @@ contains
       end do
     end do
   end function unit_cartesian_mesh_cat
+
+  function unit_cartesian_mesh_cat_perturbed(nx,ny,nz,delta) result(xyz)
+    use set_constants, only : zero, one, two
+    integer, intent(in) :: nx, ny, nz
+    real(dp), intent(in) :: delta
+    real(dp), dimension(3,nx,ny,nz) :: xyz
+    real(dp), dimension(nx,ny,nz) :: tmp_x, tmp_y, tmp_z
+    integer :: i, j, k
+    real(dp), dimension(3) :: h0
+    real(dp) :: dx, dy, dz
+
+    call unit_cartesian_mesh(nx,ny,nz,tmp_x,tmp_y,tmp_z)
+    h0 = zero
+    if ( nx > 2 ) h0(1) = one/real(nx-1,dp)
+    if ( ny > 2 ) h0(2) = one/real(ny-1,dp)
+    if ( nz > 2 ) h0(3) = one/real(nz-1,dp)
+    h0 = h0 * delta
+
+    call random_init(.true.,.false.)
+    do k = 1,nz
+      do j = 1,ny
+        do i = 1,nx
+          call random_number(dx); dx = two*dx - one; dx = dx*h0(1)
+          call random_number(dy); dy = two*dy - one; dy = dy*h0(2)
+          call random_number(dz); dz = two*dz - one; dz = dz*h0(3)
+          xyz(1,i,j,k) = tmp_x(i,j,k) + dx
+          xyz(2,i,j,k) = tmp_y(i,j,k) + dy
+          xyz(3,i,j,k) = tmp_z(i,j,k) + dz
+        end do
+      end do
+    end do
+  end function unit_cartesian_mesh_cat_perturbed
 
   pure subroutine unit_cartesian_mesh(nx,ny,nz,x,y,z)
     use set_constants, only : zero, one
@@ -2580,14 +2613,14 @@ contains
     class(grid_block),     intent(inout) :: gblock
     integer, dimension(3), intent(in)    :: n_skip
     integer,               intent(in)    :: quad_order
-    type(quad_t), dimension(3) :: ref_quads
+    type(quad_t), dimension(0:3) :: ref_quads
     real(dp), dimension(n_skip(1)+1,n_skip(1)+1,n_skip(1)+1,3) :: coords_tmp
     integer :: i, j, k
     integer :: status
     integer, dimension(3) :: idx, bnd_min, bnd_max, sz, loc1, loc2
 
     sz = n_skip + 1
-    
+    call create_quad_ref_1D(          1, ref_quads(0) )
     call create_quad_ref_1D( quad_order, ref_quads(1) )
     call create_quad_ref_2D( quad_order, ref_quads(2) )
     call create_quad_ref_3D( quad_order, ref_quads(3) )
@@ -2612,17 +2645,15 @@ contains
         end do
       end do
     end do
-
-    if ( gblock%n_dim == 1) return
     ! now the face quads
 
     ! xi-faces
     loc1 = 2
-    loc1(gblock%n_dim+1:) = 0
+    if ( gblock%n_dim /= 1) loc1(gblock%n_dim+1:) = 0
     loc1(1) = 0
 
     loc2 = 2
-    loc2(gblock%n_dim+1:) = 0
+    if ( gblock%n_dim /= 1) loc2(gblock%n_dim+1:) = 0
     loc2(1) = 1
 
     do k = 1,gblock%n_cells(3)
@@ -2651,6 +2682,8 @@ contains
         end do
       end do
     end do
+
+    if ( gblock%n_dim == 1) return
 
     ! eta-faces
     loc1 = 2
@@ -3969,6 +4002,7 @@ contains
     ! use var_rec_block_derived_type,  only : spatial_function 
     use monomial_basis_derived_type, only : monomial_basis_t
     use linspace_helper,             only : unit_cartesian_mesh_cat
+    use linspace_helper,             only : unit_cartesian_mesh_cat_perturbed
     use cross_term_sinusoid,         only : cts_t
     integer,                     intent(in)  :: n_dim, n_vars, degree
     integer, dimension(3),       intent(in)  :: n_nodes, n_ghost
@@ -3988,7 +4022,8 @@ contains
     eval_fun = cts_t(n_dim,n_vars,rand_coefs=.true.)
     call grid%setup(1)
     call grid%gblock(1)%setup(n_dim,n_nodes,n_ghost)
-    grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
+    ! grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
+    grid%gblock(1)%node_coords = unit_cartesian_mesh_cat_perturbed(n_nodes(1),n_nodes(2),n_nodes(3),0.3_dp)
     call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
     block_num = 1
 
@@ -4036,11 +4071,11 @@ program main
   integer :: degree, n_vars, n_dim
   integer, dimension(3) :: n_nodes, n_ghost
 
-  degree  = 4
+  degree  = 5
   n_vars  = 1
-  n_dim   = 2
-  n_nodes = [65,65,2]
-  n_ghost = [2,2,0]
+  n_dim   = 1
+  n_nodes = [5,5,5]
+  n_ghost = [0,0,0]
   call timer%tic()
   call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
   write(*,*) 'Elapsed time: ', timer%toc()
