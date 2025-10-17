@@ -15,6 +15,7 @@ module set_constants
   public :: zero, one, two, three, four
   public :: half, third, fourth
   public :: pi, large, near_zero
+  public :: max_text_line_length
   real(dp), parameter :: zero      = 0.0_dp
   real(dp), parameter :: one       = 1.0_dp
   real(dp), parameter :: two       = 2.0_dp
@@ -26,6 +27,7 @@ module set_constants
   real(dp), parameter :: large  = huge(one)
   real(dp), parameter :: pi     = acos(-one)
   real(dp), parameter :: near_zero = epsilon(one)
+  integer,  parameter :: max_text_line_length = 1024
 end module set_constants
 
 module project_inputs
@@ -1598,6 +1600,452 @@ contains
   end subroutine meshgrid3
 
 end module linspace_helper
+
+module tecplot_output
+  use set_precision, only : dp
+  use set_constants, only : zero
+  use message,       only : error_message
+  implicit none
+  private
+  public :: write_tecplot_file_header
+  character(*), dimension(6), parameter :: data_types=['DOUBLE  ','SINGLE  ',  &
+                                                       'LONGINT ','SHORTINT',  &
+                                                       'BYTE    ','BIT     ' ]
+  character(*), dimension(6), parameter :: formats = ['(ES23.15)','(ES16.7) ', &
+                                                      '(I11)    ','(I6)     ', &
+                                                      '(I4)     ','(I1)     ']
+contains
+
+subroutine write_tecplot_zone_header( fid, n_dim, n_nodes, n_cells,            &
+                                      n_node_vars, n_cell_vars, zone_name,     &
+                                      data_packing, data_format, var_share,    &
+                                      strand_id, solution_time )
+    integer,                                intent(in) :: fid, n_dim, n_vars
+    integer,      dimension(:),             intent(in) :: n_nodes
+    character(*), dimension(:),             intent(in) :: var_names
+    integer,                      optional, intent(in) :: n_cells
+    integer,                      optional, intent(in) :: n_cell_vars
+    character(*),                 optional, intent(in) :: zone_name
+    integer,                      optional, intent(in) :: data_packing
+    integer, dimension(:),        optional, intent(in) :: data_format
+    integer, dimension(:),        optional, intent(in) :: var_share
+    integer,                      optional, intent(in) :: strand_id
+    real(dp),                     optional, intent(in) :: solution_time
+    integer,                            intent(in) :: fid, n_dim
+    integer,                            intent(in) :: n_nodes, n_cells
+    integer,                            intent(in) :: n_node_var, n_cell_var
+    character(*),                       intent(in) :: zone_name
+    
+    integer, dimension(:),    optional, intent(in) :: data_format
+    integer,                  optional, intent(in) :: strand_id
+    real(dp),                 optional, intent(in) :: solution_time
+    if ( present(n_cells) ) then
+      call write_tecplot_fe_brick_zone_header( fid, n_dim, n_nodes, n_cells,  &
+                                                 n_node_vars, n_cell_vars,        &
+                                                 zone_name, var_name,           &
+                                                 data_format,                   &
+                                                 strand_id, solution_time )
+end subroutine write_tecplot_zone_header
+subroutine write_tecplot_ordered_zone_header( fid, n_dim, n_nodes,           &
+                                                n_node_vars, n_cell_vars,      &
+                                                zone_name,                     &
+                                                data_packing,                  &
+                                                data_format,                   &
+                                                var_share,                     &
+                                                strand_id,                     &
+                                                solution_time)!,               &
+subroutine write_tecplot_fe_brick_zone_header( fid, n_dim, n_nodes, n_cells,  &
+                                                 n_node_vars, n_cell_vars,        &
+                                                 zone_name, var_name,           &
+                                                 data_format,                   &
+                                                 strand_id, solution_time )
+  subroutine write_tecplot_var_fmt( var_name, fmt )
+    character(*), dimension(:),  intent(in)  :: var_name
+    character(*),                intent(out) :: fmt
+    integer               :: n_vars, i
+    n_vars = size(var_name)
+    write(fmt,'((A),I0,(A))') "('VARIABLES = ',", n_vars-1,                  &
+                  "('""',(A),'""',', '),'""',(A),'""')"
+    write(fmt,trim(fmt)) (trim(var_name(i)),i=1,n_vars)
+  end subroutine write_tecplot_var_fmt
+
+  subroutine write_tecplot_loc_fmt( n_node_vars, n_cell_vars, fmt )
+    integer,      intent(in)  :: n_node_vars, n_cell_vars
+    character(*), intent(out) :: fmt  
+    integer                   :: loc_ind, i
+    integer, dimension(4)     :: loc_range
+    character(100)            :: loc_cell, loc_nodal
+    loc_ind   = 1
+    loc_range = 1
+    if ( n_node_vars > 0 ) then
+      write(loc_nodal,'(A)') "('[',I0,'-',I0,']=NODAL'"
+      if (n_cell_vars>0) then; loc_nodal = trim(loc_nodal)//",',')"
+      else;                    loc_nodal = trim(loc_nodal)//")"
+      end if
+      loc_range(2) = n_node_vars
+      loc_ind = 2
+    else
+      write(loc_nodal,'(A)') ''
+    end if
+
+    if ( n_cell_vars > 0 ) then
+      write(loc_cell,'(A)') "'[',I0,'-',I0,']=CELLCENTERED')"
+      if (n_node_vars>0) then; loc_cell = ",("//trim(loc_cell)
+      else;                    loc_cell = "("//trim(loc_cell)
+      end if
+      loc_range(3) = n_node_vars + 1
+      loc_range(4) = n_node_vars + n_cell_vars
+      loc_ind = 4
+    else
+      write(loc_cell,'(A)') ''
+    end if
+    write(fmt,'(A)') "('VARLOCATION=(',"//trim(loc_nodal)//                  &
+                                          trim(loc_cell)//"')')"
+    write(fmt,trim(fmt)) (loc_range(i),i=1,loc_ind)
+  end subroutine write_tecplot_loc_fmt
+
+  subroutine write_tecplot_data_type_fmt( n_vars, fmt, data_format )
+    integer,                              intent(in)  :: n_vars
+    character(*),                         intent(out) :: fmt
+    integer, dimension(n_vars), optional, intent(in)  :: data_format
+    character(*), parameter :: routine_name = 'write_tecplot_data_type_fmt'
+    integer :: i
+    logical :: err
+    write(fmt,'((A),I0,(A))') "('DT=(',(A),", n_vars-1,"(',',(A))')')"
+    if ( present(data_format) ) then
+      if ( any(data_format<1).or.any(data_format>6) ) then
+        err = error_message(routine_name,'data_format must be in range [1,6]')
+      end if
+      write(fmt,trim(fmt)) ( trim( data_types( data_format(i) ) ),i=1,n_vars)
+    else
+      write(fmt,trim(fmt)) (trim(data_types(1)),i=1,n_vars)
+    end if
+  end subroutine write_tecplot_data_type_fmt
+
+  subroutine write_tecplot_var_share_fmt( var_info, fmt )
+  ! assume donor zone is first integer in var_info
+    integer, dimension(:),       intent(in)  :: var_info
+    character(*),                intent(out) :: fmt
+    character(*), parameter :: routine_name = 'write_tecplot_var_share_fmt'
+    integer :: n_vars, zone_num, i
+    logical :: err
+    n_vars = size(var_info) - 1
+    if (n_vars < 1) then
+      err = error_message(routine_name,'No variables were specified to be shared')
+    end if
+    zone_num = var_info(1)
+    write(fmt,'((A),I0,(A),I0,(A))') "('VARSHARELIST=([',I0,", n_vars-1,       &
+                                                 "(',',I0),']=", zone_num, ")')"
+    write(fmt,trim(fmt)) ( var_info(i+1),i=1,n_vars)
+  end subroutine write_tecplot_var_share_fmt
+
+  !======================== write_tecplot_file_header ==========================80
+  !>
+  !! Generic routine for writing header info in Tecplot ASCII file
+  !<
+  !=============================================================================80
+  subroutine write_tecplot_file_header( fid, var_names, title, filetype )
+
+    integer,                            intent(in) :: fid
+    character(*), dimension(:),         intent(in) :: var_names
+    character(*), optional,             intent(in) :: title
+    integer,      optional,             intent(in) :: filetype ! 0, 1, or 2
+
+    integer               :: n_vars
+    logical               :: err
+    character(1024)       :: var_fmt, title_fmt
+
+    character(*), parameter :: routine_name = 'write_tecplot_file_header'
+
+    call write_tecplot_var_fmt(var_names,var_fmt)
+
+    write( fid, * )
+    if ( present(title) ) then
+      write(title_fmt,"('TITLE=','""',(A),'""')") trim(title)
+      write( fid, '(A)' ) trim( title_fmt )
+    end if
+    if ( present(filetype) ) then
+      select case(filetype)
+      case(0)
+        write( fid, '(A)' ) 'FILETYPE=FULL'
+      case(1)
+        write( fid, '(A)' ) 'FILETYPE=GRID'
+      case(2)
+        write( fid, '(A)' ) 'FILETYPE=SOLUTION'
+      case default
+        err = error_message(routine_name, 'unrecognized filetype! must be '//  &
+                                '0 ("FULL"), 1 ("GRID"), or 2 ("SOLUTION")' )
+      end select
+    end if
+    write( fid, '(A)' ) trim( var_fmt )
+
+  end subroutine write_tecplot_file_header
+
+!===================== write_tecplot_ordered_zone_header =====================80
+!>
+!! Generic routine for writing ordered zone header info in Tecplot ASCII file
+!<
+!=============================================================================80
+  subroutine write_tecplot_ordered_zone_header( fid, n_dim, n_nodes,           &
+                                                n_node_vars,                   &
+                                                n_cell_vars,                   &
+                                                zone_name,                     &
+                                                var_names,                     &
+                                                var_share,                     &
+                                                data_packing,                  &
+                                                data_format,                   &
+                                                strand_id,                     &
+                                                solution_time )!,              &
+                                                ! aux_data )
+    use set_constants, only : max_text_line_length
+    integer,                                intent(in) :: fid, n_dim
+    integer, dimension(:),                  intent(in) :: n_nodes
+    integer,                                intent(in) :: n_node_vars
+    integer,                                intent(in) :: n_cell_vars
+    character(*),                 optional, intent(in) :: zone_name
+    character(*), dimension(:),   optional, intent(in) :: var_names
+    integer, dimension(:),        optional, intent(in) :: var_share
+    integer,                      optional, intent(in) :: data_packing
+    integer, dimension(:),        optional, intent(in) :: data_format
+    integer,                      optional, intent(in) :: strand_id
+    real(dp),                     optional, intent(in) :: solution_time
+    ! character(*), dimension(:,:), optional, intent(in) :: aux_data
+    integer :: i, n_vars
+    logical :: err
+    character(max_text_line_length) :: loc_fmt, type_fmt
+    character(max_text_line_length) :: var_fmt, var_share_fmt
+    character(max_text_line_length) :: zone_fmt1, zone_fmt2
+    character(*), parameter :: routine_name = 'write_tecplot_ordered_zone_header'
+    character(*), dimension(3), parameter :: IJK = ['I','J','K']
+
+    if ( n_dim < 1 .or. n_dim > 3 ) then
+      err = error_message( routine_name, 'Tecplot ordered file-format '//      &
+                                         'supports only 1-3 dim.' )
+    end if
+
+    write( fid, *     )
+    if ( present(zone_name) ) then
+      write(zone_fmt1,"('ZONE T=','""',(A),'""')") trim(zone_name)
+    else
+      write(zone_fmt1,"(A)") 'ZONE'
+    end if
+
+    write( fid, '(A)' ) 'ZONETYPE=ORDERED'
+
+    do i = 1,n_dim
+      write( fid, "((A),'=',I0)") IJK(i), n_nodes(i)
+    end do
+
+    if ( present(data_packing) ) then
+      select case(data_packing)
+      case(0)
+        if (n_cell_vars > 0) then
+          err = error_message(routine_name, 'data_packing must be "BLOCK" '//  &
+                                            'for cell-centered data' )
+        end if
+        write( fid, '(A)' ) 'DATAPACKING=POINT'
+      case(1)
+        write( fid, '(A)' ) 'DATAPACKING=BLOCK'
+      case default
+        err = error_message(routine_name, 'unrecognized data_packing! must '// &
+                                          'be 0 ("POINT"), 1 ("BLOCK")' )
+      end select
+    end if
+
+    call write_tecplot_loc_fmt( n_node_vars, n_cell_vars, loc_fmt )
+    write( fid, '(A)' ) trim( loc_fmt   )
+
+    n_vars = n_node_vars + n_cell_vars
+
+    if ( present(data_format) )  then
+      if (size(data_format)/=n_vars) then
+        err = error_message(routine_name,"Size of optional argument "//        &
+                                        "'data_format' does not match "//      &
+                                        "number of variables.")
+      end if
+      call write_tecplot_data_type_fmt( n_vars, type_fmt,                      &
+                                        data_format=data_format )
+    else
+      call write_tecplot_data_type_fmt( n_vars, type_fmt )
+    end if
+    write( fid, '(A)' ) trim( type_fmt )
+
+    if ( present(var_share) )  then
+      call write_tecplot_var_share_fmt( var_share, var_share_fmt )
+      write( *, '(A)' ) trim( var_share_fmt )
+      write( fid, '(A)' ) trim( var_share_fmt )
+    end if
+
+    write( fid, *     )
+    write( fid, '(A)' ) trim( var_fmt   )
+    write( fid, '(A)' ) trim( zone_fmt1 )
+    write( fid, '(A)' ) trim( zone_fmt2 )
+    write( fid, '(A)' ) trim( loc_fmt   )
+    write( fid, '(A)' ) trim( type_fmt  )
+
+    if ( present(strand_id) )  then
+      write( fid, '((A),I0)' ) 'STRANDID=',strand_id
+    end if
+
+    if ( present(solution_time) )  then
+      write( fid, '((A),ES23.15)' ) 'SOLUTIONTIME=',solution_time
+    end if
+
+  end subroutine write_tecplot_ordered_zone_header
+
+  subroutine write_tecplot_fe_brick_zone_header( fid, n_dim, n_nodes,          &
+                                                 n_cells,                      &
+                                                 n_node_vars,                  &
+                                                 n_cell_vars,                  &
+                                                 zone_name,                    &
+                                                 var_names,                    &
+                                                 data_format,                  &
+                                                 strand_id,                    &
+                                                 solution_time )
+    use set_constants, only : max_text_line_length
+    integer,                              intent(in) :: fid, n_dim
+    integer,                              intent(in) :: n_nodes, n_cells
+    integer,                              intent(in) :: n_node_vars, n_cell_vars
+    character(*),                         intent(in) :: zone_name
+    character(*), dimension(:), optional, intent(in) :: var_names
+    integer,      dimension(:), optional, intent(in) :: data_format
+    integer,                    optional, intent(in) :: strand_id
+    real(dp),                   optional, intent(in) :: solution_time
+    integer               :: n_vars
+    logical               :: err
+    character(max_text_line_length) :: var_fmt, loc_fmt, type_fmt
+    character(max_text_line_length) :: zone_fmt1, zone_fmt2
+    character(*), parameter :: routine_name = 'write_tecplot_fe_brick_zone_header'
+
+    if ( present(zone_name) ) then
+      write(zone_fmt1,"('ZONE T=','""',(A),'""')") trim(zone_name)
+    else
+      write(zone_fmt1,"(A)") 'ZONE'
+    end if
+
+    if ( present(var_names) ) then
+      call write_tecplot_var_fmt(var_names,var_fmt)
+    end if
+
+    select case(n_dim)
+    case(2)
+      write(zone_fmt2,'((A),(A))') "('NODES=',I0,', ELEMENTS=',I0,",           &
+                                   "', DATAPACKING=BLOCK, "//                  &
+                                   "ZONETYPE=FEQUADRILATERAL')"
+    case(3)
+      write(zone_fmt2,'((A),(A))') "('NODES=',I0,', ELEMENTS=',I0,",           &
+                                   "', DATAPACKING=BLOCK, ZONETYPE=FEBRICK')"
+    case default
+      err = error_message(routine_name,"Only n_dim=2 or 3 supported")
+    end select
+
+    write(zone_fmt2,trim(zone_fmt2)) n_nodes, n_cells
+    call write_tecplot_loc_fmt( n_node_vars, n_cell_vars, loc_fmt )
+
+    n_vars = n_node_vars + n_cell_vars
+    if ( present(data_format) ) then
+      if (size(data_format)/=n_vars) then
+        err = error_message(routine_name,"Size of optional argument "//        &
+                                         "'data_format' does not match "//     &
+                                         "number of variables.")
+      end if
+      call write_tecplot_data_type_fmt( n_vars, type_fmt,                      &
+                                        data_format=data_format )
+    else
+      call write_tecplot_data_type_fmt( n_vars, type_fmt )
+    end if
+
+    write( fid, *     )
+    if ( present(var_names) ) write( fid, '(A)' ) trim( var_fmt )
+    write( fid, '(A)' ) trim( zone_fmt1 )
+    write( fid, '(A)' ) trim( zone_fmt2 )
+    write( fid, '(A)' ) trim( loc_fmt   )
+    write( fid, '(A)' ) trim( type_fmt  )
+
+    if ( present(strand_id) )  then
+      write( fid, '((A),I0)' ) 'STRANDID=',strand_id
+    end if
+
+    if ( present(solution_time) )  then
+      write( fid, '((A),ES23.15)' ) 'SOLUTIONTIME=',solution_time
+    end if
+
+  end subroutine write_tecplot_fe_brick_zone_header
+
+  subroutine write_tecplot_ordered_zone_block_packed( fid, fmt, n_nodes,       &
+                                                      n_node_vars, n_cell_vars,&
+                                                      NODE_DATA, CELL_DATA )
+    integer,                  intent(in) :: fid
+    character(*),             intent(in) :: fmt
+    integer, dimension(:),    intent(in) :: n_nodes
+    integer,                  intent(in) :: n_node_vars, n_cell_vars
+    real(dp), dimension(:,:), intent(in) :: NODE_DATA
+    real(dp), dimension(:,:), intent(in) :: CELL_DATA
+    integer :: v, i, n_n, n_c
+    character(*), parameter :: routine_name = 'write_tecplot_ordered_zone_block_packed'
+    n_n = product(n_nodes)
+    n_c = product(max(n_nodes-1,1))
+    write(fid,fmt) ( ( NODE_DATA(v,i), i = 1,n_n ), v = 1,n_node_vars )
+    write(fid,fmt) ( ( CELL_DATA(v,i), i = 1,n_c ), v = 1,n_cell_vars )
+
+  end subroutine write_tecplot_ordered_zone_block_packed
+
+  subroutine write_tecplot_ordered_zone_point_packed( fid, fmt, n_nodes,       &
+                                                      n_vars, NODE_DATA )
+    integer,                  intent(in) :: fid
+    character(*),             intent(in) :: fmt
+    integer, dimension(:),    intent(in) :: n_nodes
+    integer,                  intent(in) :: n_vars
+    real(dp), dimension(:,:), intent(in) :: NODE_DATA
+    integer :: v, i, n_n
+    character(*), parameter :: routine_name = 'write_tecplot_ordered_zone_point_packed'
+    n_n = product(n_nodes)
+    do i = 1,n_n
+      write(fid,'('//fmt//'," ")',advance='no') ( NODE_DATA(v,i), v = 1,n_vars )
+    end do
+  end subroutine write_tecplot_ordered_zone_point_packed
+
+  subroutine write_tecplot_fe_brick_zone( fid, n_nodes, n_cells, n_node_var,   &
+                                          n_cell_var, NODE_DATA, CELL_DATA,    &
+                                          conn_idx, data_format )
+    integer,                  intent(in) :: fid
+    integer,                  intent(in) :: n_nodes,    n_cells
+    integer,                  intent(in) :: n_node_var, n_cell_var
+    real(dp), dimension(:,:), intent(in) :: NODE_DATA
+    real(dp), dimension(:,:), intent(in) :: CELL_DATA
+    integer,  dimension(:,:), intent(in) :: conn_idx
+    integer,  dimension(:), optional, intent(in) :: data_format
+    integer :: v, t, n_brick, cnt
+    logical :: err
+    character(len=100) :: conn_fmt
+    n_brick = size(conn_idx,1)
+    if ( present(data_format) ) then
+      cnt = 0
+      do v = 1,n_node_var
+        cnt = cnt + 1
+        write(fid,trim(formats(data_format(cnt)))) ( NODE_DATA(v,t), t=1,n_nodes )
+      end do
+      do v = 1,n_cell_var
+        cnt = cnt + 1
+        select case(data_format(cnt))
+        case(1,2)
+          write(fid,trim(formats(data_format(cnt)))) ( CELL_DATA(v,t), t=1,n_cells )
+        case default
+          write(fid,trim(formats(data_format(cnt)))) ( int(CELL_DATA(v,t)), t=1,n_cells )
+        end select
+      end do
+    else
+      write(fid,formats(1)) ( ( NODE_DATA(v,t), t=1,n_nodes ), v=1,n_node_var )
+      write(fid,formats(1)) ( ( CELL_DATA(v,t), t=1,n_cells ), v=1,n_cell_var )
+    end if
+
+    write(conn_fmt,'((A),I0,(A))') "((I0),", n_brick-1,"(' ',(I0)))"
+    do t = 1,merge(n_cells,n_nodes,n_cell_var>0)
+      write(fid,trim(conn_fmt)) ( conn_idx(v,t), v=1,n_brick )
+    end do
+
+  end subroutine write_tecplot_fe_brick_zone
+end module tecplot_output
 
 module interpolant_derived_type
   use set_precision, only : dp
