@@ -1624,7 +1624,7 @@ module tecplot_output
   use message,       only : error_message
   implicit none
   private
-  public :: write_tecplot_file_header
+  public :: write_tecplot_ordered_zone_header
   character(*), dimension(6), parameter :: data_types=['DOUBLE  ','SINGLE  ',  &
                                                        'LONGINT ','SHORTINT',  &
                                                        'BYTE    ','BIT     ' ]
@@ -2139,358 +2139,6 @@ contains
     end if
   end subroutine formatted_write
 end module tecplot_output
-
-! module reconstruction_output
-! use set_precision, only : dp
-! use set_constants, only : one, zero
-! use grid_derived_type, only : grid_type, grid_block
-! use var_rec_cell_derived_type, only : var_rec_block_t
-! implicit none
-! private
-
-! contains
-!   subroutine subcell_to_file( grid, soln, reconstruction, exact, error, tag )
-!     use project_inputs,      only : job_name
-!     use grid_derived_type,   only : grid_type
-!     use soln_derived_type,   only : soln_type
-
-!     type(grid_type),        intent(in) :: grid
-!     type(soln_type),        intent(in) :: soln
-!     logical,      optional, intent(in) :: reconstruction, exact, error
-!     character(*), optional, intent(in) :: tag
-!     integer :: fid, blk
-!     character(100) :: file_name
-!     logical, dimension(3) :: opt
-
-!     character(*), dimension(3), parameter :: var_prefix = ['REC','EXT','ERR']
-!     character(*), dimension(7), parameter :: var_suffix = ['rho','u  ','v  ','w  ','p  ','t1 ','t2 ']
-
-!     character(100), dimension(:),   allocatable :: var_names
-
-!     integer :: n_poly_var
-!     integer :: ii, jj, cnt
-
-
-!     opt = .false.
-!     opt(2) = present(exact)
-!     opt(3) = present(error)
-!     opt(1) = present(reconstruction) .or. ( (.not. opt(2)) .and. (.not. opt(3)) )
-    
-!     file_name = trim(job_name)//'-reconstructed'
-!     if (present(tag)) then
-!       file_name = trim(file_name)//'-'//trim(tag)//'.dat'
-!     else
-!       file_name = trim(file_name)//'.dat'
-!     end if
-
-!     n_poly_var = soln%n_total_eqs
-
-!     allocate( var_names(  3 + n_poly_var*count(opt) ) )
-!     var_names(1) = 'x'
-!     var_names(2) = 'y'
-!     var_names(3) = 'z'
-!     cnt = 3
-!     do jj = 1,3
-!       if (.not. opt(jj)) cycle
-!       do ii = 1,n_poly_var
-!         cnt = cnt + 1
-!         write(var_names(cnt),'(A)') var_prefix(jj)//':'//trim(var_suffix(ii))
-!       end do
-!     end do
-
-!     open( newunit=fid, file=trim(file_name), status='unknown')
-!     call write_tecplot_file_header( fid, var_names )
-
-!     deallocate(var_names)
-
-!     do blk = 1,grid%nblocks
-!       call block_subcell_to_file( fid, grid, soln, blk, opt )
-!     end do
-
-!     close(fid)
-
-!   end subroutine subcell_to_file
-
-!   subroutine block_subcell_to_file( fid, grid, soln, blk, opt )
-
-!     use grid_derived_type,   only : grid_type
-!     use soln_derived_type,   only : soln_type
-
-!     integer,         intent(in) :: fid
-!     type(grid_type), intent(in) :: grid
-!     type(soln_type), intent(in) :: soln
-!     integer,         intent(in) :: blk
-!     logical, dimension(3), intent(in) :: opt
-!     integer :: i, j, k
-
-!     do k = 1,grid%gblock(blk)%k_cells
-!       do j = 1,grid%gblock(blk)%j_cells
-!         do i = 1,grid%gblock(blk)%i_cells
-!           call cell_subcell_to_file( fid, grid, soln, blk, i, j, k, opt )
-!         end do
-!       end do
-!     end do
-
-!   end subroutine block_subcell_to_file
-
-
-!   subroutine cell_subcell_to_file( fid, grid, soln, blk, i, j, k, opt )  
-!     use set_constants,       only : zero, one, half, third
-!     use set_inputs,          only : quad_order, limit_reconstruct
-!     use exact_inputs,        only : use_exact
-!     use grid_derived_type,   only : grid_type
-!     use soln_derived_type,   only : soln_type
-!     use gauss_quadrature_1D, only : gauss_1D_size
-!     use mms_holder,          only : mms
-!     use solution_conversion, only : nondimensional_to_dimensional
-
-!     integer,               intent(in) :: fid
-!     type(grid_type),       intent(in) :: grid
-!     type(soln_type),       intent(in) :: soln
-!     integer,               intent(in) :: blk, i, j, k
-!     logical, dimension(3), intent(in) :: opt
-
-!     character(*), parameter :: flt_fmt = '(ES23.15)'
-!     character(*), parameter :: routine_name='cell_subcell_to_file'
-!     character(100)          :: zone_name
-    
-
-!     real(dp),       dimension(:,:), allocatable :: tmp_var
-!     real(dp),       dimension(:,:), allocatable :: NODE_DATA, CELL_DATA, tmp_NODES
-    
-!     integer, dimension(3) :: n_quad, sz
-!     integer               :: n_nodes, n_turb, n_node_var, n_cell_var, n_poly_var
-!     integer :: ii, jj, cnt, n
-
-!     n_quad    = gauss_1D_size(quad_order)
-!     n_quad(3) = merge( 1, n_quad(3), twod )
-
-!     write(zone_name,'("CELL:[",I0,3(",",I0),"]")') blk, i, j, k
-
-!     n_turb     = soln%n_turb
-!     n_poly_var = size( soln%sblock(blk)%reconstruct(i,j,k)%polynomial%coeff, 1 )
-!     n_node_var = 3 + n_poly_var*count(opt)
-!     n_cell_var = 0
-
-!     sz(1)   = n_quad(1) + 2
-!     sz(2)   = n_quad(2) + 2
-!     sz(3)   = merge( 1, n_quad(3) + 2, twod )
-!     n_nodes = product(sz)
-!     allocate( tmp_NODES( 3, n_nodes ) )
-!     allocate( tmp_var( n_poly_var, 3 ) )
-!     allocate( NODE_DATA( n_node_var, n_nodes ) )
-!     allocate( CELL_DATA( n_cell_var, n_nodes ) )
-
-!     call cat_quads( n_quad, grid, blk, i, j, k, tmp_NODES )
-
-!     do n = 1,n_nodes
-!       tmp_var = -99.0_dp
-!       NODE_DATA( 1:3, n ) = tmp_NODES( 1:3, n )
-!       if ( limit_reconstruct ) then
-!         tmp_var(:,1) = soln%sblock(blk)%reconstruct( i, j, k )%polynomial%evaluate(   &
-!                                                             NODE_DATA( 1:3, n ),     &
-!                                                             soln%sblock(blk)%ho_limiter(:,i,j,k) )
-!       else
-!         tmp_var(:,1) = soln%sblock(blk)%reconstruct( i, j, k )%polynomial%evaluate(   &
-!                                                             NODE_DATA( 1:3, n ) )
-!       end if
-
-!       call nondimensional_to_dimensional( tmp_var(:,1) )
-!       if (use_exact) then
-!         call mms%manufactured_soln%soln( NODE_DATA( 1:3, n ), tmp_var(:,2) )
-!         call nondimensional_to_dimensional( tmp_var(:,2) )
-!         tmp_var(:,3) = tmp_var(:,1) - tmp_var(:,2)
-!       end if
-!       cnt = 3
-!       do jj = 1,3
-!         if (.not. opt(jj)) cycle
-!         do ii = 1,n_poly_var
-!           cnt = cnt + 1
-!           NODE_DATA(cnt,n) = tmp_var(ii,jj)
-!         end do
-!       end do
-
-!     end do
-
-!     call write_tecplot_ordered_zone_header( fid, 3, sz, n_node_var, n_cell_var, zone_name, strand_id=1 )
-
-!     call write_tecplot_ordered_zone_block_packed( fid, flt_fmt, 3, sz,             &
-!                                                   n_node_var, n_cell_var,          &
-!                                                   NODE_DATA, CELL_DATA )
-
-!     deallocate( tmp_var, NODE_DATA, CELL_DATA, tmp_NODES )
-
-!   end subroutine cell_subcell_to_file
-
-
-!   subroutine cat_quads( n_quad, grid, blk, i_idx, j_idx, k_idx, out )
-!     use set_constants,       only : zero, one
-!     use set_inputs,          only : use_ho_grid_eval
-!     use reference_inputs,    only : l_ref, l_ref_grid
-!     use grid_derived_type,   only : grid_type
-!     use soln_derived_type,   only : soln_type
-!     use gauss_quadrature_1D, only : gauss_1D_size
-!     use quadrature_derived_type, only : quad_t
-
-!     integer,  dimension(3),   intent(in)  :: n_quad
-!     type(grid_type), target,  intent(in)  :: grid
-!     integer,                  intent(in)  :: blk, i_idx, j_idx, k_idx
-!     real(dp), dimension(:,:), intent(out) :: out
-
-!     type(quad_t), dimension(:,:,:), pointer :: face_quad, cell_quad
-
-!     real(dp), dimension(:,:,:), allocatable :: Xtmp, Ytmp, Ztmp, Wtmp
-!     integer :: i, j, k, cnt
-!     integer :: n_nodes, n, v
-!     integer, dimension(3) :: sz
-!     integer, dimension(2) :: is, js, ks
-
-
-!     sz(1) = n_quad(1) + 2
-!     sz(2) = n_quad(2) + 2
-!     sz(3) = merge(1,n_quad(3) + 2,twod)
-
-!     allocate( Xtmp(sz(1),sz(2),sz(3)) ); Xtmp = zero
-!     allocate( Ytmp(sz(1),sz(2),sz(3)) ); Ytmp = zero
-!     allocate( Ztmp(sz(1),sz(2),sz(3)) ); Ztmp = zero
-!     allocate( Wtmp(sz(1),sz(2),sz(3)) ); Wtmp = zero
-
-!     n_nodes    = product(sz)
-
-!     ! first the volume quadrature nodes
-!     if ( use_ho_grid_eval ) then
-!       cell_quad => grid%gblock(blk)%grid_vars%quad_curv
-!     else
-!       cell_quad => grid%gblock(blk)%grid_vars%quad
-!     end if
-
-
-!     is(1) = 2;                is(2) = sz(1)-1
-!     js(1) = 2;                js(2) = sz(2)-1
-!     ks(1) = merge(1,2,twod);  ks(2) = merge(1,sz(3)-1,twod)
-!     ! Xtmp( is(1):is(2), js(1):js(2), ks(1):ks(2) ) = reshape(                     &
-!     !               cell_quad( i_idx, j_idx, k_idx )%quad_pts( 1, : ), n_quad )
-!     ! Ytmp( is(1):is(2), js(1):js(2), ks(1):ks(2) ) = reshape(                     &
-!     !               cell_quad( i_idx, j_idx, k_idx )%quad_pts( 2, : ), n_quad )
-!     ! Ztmp( is(1):is(2), js(1):js(2), ks(1):ks(2) ) = reshape(                     &
-!     !               cell_quad( i_idx, j_idx, k_idx )%quad_pts( 3, : ), n_quad )
-!     cnt = 0
-!     do k = ks(1),ks(2)
-!       do j = js(1),js(2)
-!         do i = is(1),is(2)
-!           cnt = cnt + 1
-!           Xtmp( i, j, k ) = cell_quad( i_idx, j_idx, k_idx )%quad_pts( 1, cnt )
-!           Ytmp( i, j, k ) = cell_quad( i_idx, j_idx, k_idx )%quad_pts( 2, cnt )
-!           Ztmp( i, j, k ) = cell_quad( i_idx, j_idx, k_idx )%quad_pts( 3, cnt )
-!         end do
-!       end do
-!     end do
-
-!     ! now the face quads
-!     is(1) = 1;                is(2) = sz(1)
-!     js(1) = 2;                js(2) = sz(2)-1
-!     ks(1) = merge(1,2,twod);  ks(2) = merge(1,sz(3)-1,twod)
-
-!     if ( use_ho_grid_eval ) then
-!       face_quad => grid%gblock(blk)%grid_vars%xi_face_quad_curv
-!     else
-!       face_quad => grid%gblock(blk)%grid_vars%xi_face_quad
-!     end if
-
-!     do i = 1,2
-!       cnt = 0
-!       do k = ks(1),ks(2)
-!         do j = js(1),js(2)
-!           cnt = cnt + 1
-!           Xtmp( is(i), j, k ) = face_quad          &
-!                                     ( i_idx+i-1, j_idx, k_idx )%quad_pts( 1, cnt )
-!           Ytmp( is(i), j, k ) = face_quad          &
-!                                     ( i_idx+i-1, j_idx, k_idx )%quad_pts( 2, cnt )
-!           Ztmp( is(i), j, k ) = face_quad          &
-!                                     ( i_idx+i-1, j_idx, k_idx )%quad_pts( 3, cnt )
-!         end do
-!       end do
-!     end do
-
-
-!     is(1) = 2;                is(2) = sz(1)-1
-!     js(1) = 1;                js(2) = sz(2)
-!     ks(1) = merge(1,2,twod);  ks(2) = merge(1,sz(3)-1,twod)
-
-!     if ( use_ho_grid_eval ) then
-!       face_quad => grid%gblock(blk)%grid_vars%eta_face_quad_curv
-!     else
-!       face_quad => grid%gblock(blk)%grid_vars%eta_face_quad
-!     end if
-    
-!     do j = 1,2
-!       cnt = 0
-!       do k = ks(1),ks(2)
-!         do i = is(1),is(2)
-!           cnt = cnt + 1
-!           Xtmp( i, js(j), k ) = face_quad         &
-!                                     ( i_idx, j_idx+j-1, k_idx )%quad_pts( 1, cnt )
-!           Ytmp( i, js(j), k ) = face_quad         &
-!                                     ( i_idx, j_idx+j-1, k_idx )%quad_pts( 2, cnt )
-!           Ztmp( i, js(j), k ) = face_quad         &
-!                                     ( i_idx, j_idx+j-1, k_idx )%quad_pts( 3, cnt )
-!         end do
-!       end do
-!     end do
-
-!     if (.not. twod) then
-!       is(1) = 2;  is(2) = sz(1)-1
-!       js(1) = 2;  js(2) = sz(2)-1
-!       ks(1) = 1;  ks(2) = sz(3)
-!       if ( use_ho_grid_eval ) then
-!         face_quad => grid%gblock(blk)%grid_vars%zeta_face_quad_curv
-!       else
-!         face_quad => grid%gblock(blk)%grid_vars%zeta_face_quad
-!       end if
-!       do k = 1,2
-!         cnt = 0
-!         do j = js(1),js(2)
-!           do i = is(1),is(2)
-!             cnt = cnt + 1
-!             Xtmp( i, j, ks(k) ) = face_quad     &
-!                                   ( i_idx, j_idx, k_idx+k-1 )%quad_pts( 1, cnt )
-!             Ytmp( i, j, ks(k) ) = face_quad     &
-!                                   ( i_idx, j_idx, k_idx+k-1 )%quad_pts( 2, cnt )
-!             Ztmp( i, j, ks(k) ) = face_quad     &
-!                                   ( i_idx, j_idx, k_idx+k-1 )%quad_pts( 3, cnt )
-!           end do
-!         end do
-!       end do
-!     end if
-
-!     ! now the corners
-!     ! NOTE: edges aren't computed currently - would be needed for 3D
-!     is(1) = 1;  is(2) = sz(1)
-!     js(1) = 1;  js(2) = sz(2)
-!     ks(1) = 1;  ks(2) = sz(3)
-!     do k = 1,merge(1,2,twod)
-!       do j = 1,2
-!         do i = 1,2
-!           Xtmp( is(i), js(j), ks(k) ) =                                          &
-!                             grid%gblock(blk)%x( i_idx+i-1, j_idx+j-1, k_idx+k-1 )
-!           Ytmp( is(i), js(j), ks(k) ) =                                          &
-!                             grid%gblock(blk)%y( i_idx+i-1, j_idx+j-1, k_idx+k-1 )
-!           Ztmp( is(i), js(j), ks(k) ) =                                          &
-!                             grid%gblock(blk)%z( i_idx+i-1, j_idx+j-1, k_idx+k-1 )
-!         end do
-!       end do
-!     end do
-
-!     out(1,:) = pack(Xtmp,.true.)
-!     out(2,:) = pack(Ytmp,.true.)
-!     out(3,:) = pack(Ztmp,.true.)
-
-!     out = out * l_ref / l_ref_grid
-
-!     deallocate(Xtmp,Ytmp,Ztmp,Wtmp)
-
-!   end subroutine cat_quads
-! end module reconstruction_output
 
 module interpolant_derived_type
   use set_precision, only : dp
@@ -3093,61 +2741,122 @@ contains
     call LegendreGaussNodesAndWeights(n_quad-1, pts_1D, wts_1D)
   end subroutine gauss_1D
 
-  pure subroutine create_quad_ref_1D( quad_order, quad_ref )
-    integer,      intent(in)  :: quad_order
-    type(quad_t), intent(out) :: quad_ref
-    real(dp), dimension( gauss_1D_size( quad_order ) ) :: xtmp
-    integer :: n_quad
-    n_quad = gauss_1D_size( quad_order )
+  pure subroutine gauss_1D_w_ends(n_quad,pts_1D,wts_1D)
+    use set_constants, only : one
+    integer,                       intent(in)  :: n_quad
+    real(dp), dimension(0:n_quad+1), intent(out) :: pts_1D
+    real(dp), dimension(0:n_quad+1), intent(out) :: wts_1D
+    pts_1D = zero; pts_1D(0) = -one; pts_1D(n_quad+1) = one
+    wts_1D = zero
+    call gauss_1D(n_quad,pts_1D(1:n_quad),wts_1D(1:n_quad))
+  end subroutine gauss_1D_w_ends
+
+  pure subroutine create_quad_ref_1D( quad_order, quad_ref, include_ends )
+    integer,           intent(in)  :: quad_order
+    type(quad_t),      intent(out) :: quad_ref
+    logical, optional, intent(in)  :: include_ends
+    logical :: include_ends_
+    real(dp), dimension(:), allocatable :: pts_1D
+    real(dp), dimension(:), allocatable :: wts_1D
+    integer :: n_quad, n_gauss
+    include_ends_ =.false.
+    if ( present(include_ends) ) include_ends_ = include_ends
+    n_gauss = gauss_1D_size( quad_order )
+    if (include_ends_) then
+      allocate( pts_1D(0:n_gauss+1) )
+      allocate( wts_1D(0:n_gauss+1) )
+      call gauss_1D_w_ends( n_gauss, pts_1D, wts_1D )
+      n_quad = n_gauss + 2
+    else
+      allocate( pts_1D(n_gauss) )
+      allocate( wts_1D(n_gauss) )
+      call gauss_1D( n_gauss, pts_1D, wts_1D )
+      n_quad = n_gauss
+    end if
     call quad_ref%destroy()
     call quad_ref%create( n_quad )
-    call gauss_1D( n_quad, xtmp, quad_ref%quad_wts )
-    quad_ref%quad_pts(1,:) = xtmp
+    quad_ref%quad_wts      = pack(wts_1D,.true.)
+    quad_ref%quad_pts(1,:) = pack(pts_1D,.true.)
+    deallocate( pts_1D, wts_1D )
   end subroutine create_quad_ref_1D
 
-  pure subroutine create_quad_ref_2D( quad_order, quad_ref )
+  pure subroutine create_quad_ref_2D( quad_order, quad_ref, include_ends )
     use set_constants, only : zero
     integer,      intent(in)  :: quad_order
     type(quad_t), intent(out) :: quad_ref
-    integer :: n_quad
-    integer :: i, j, cnt
-    real(dp), dimension( gauss_1D_size( quad_order ) ) :: pts_1D
-    real(dp), dimension( gauss_1D_size( quad_order ) ) :: wts_1D
-    n_quad = gauss_1D_size( quad_order )
-    call gauss_1D(n_quad, pts_1D, wts_1D)
+    logical, optional, intent(in)  :: include_ends
+    logical :: include_ends_
+    integer :: n_quad, n_gauss
+    integer :: i, j, cnt, o
+    real(dp), dimension(:), allocatable :: pts_1D
+    real(dp), dimension(:), allocatable :: wts_1D
+    include_ends_ =.false.
+    if ( present(include_ends) ) include_ends_ = include_ends
+    n_gauss = gauss_1D_size( quad_order )
+    if (include_ends_) then
+      allocate( pts_1D(0:n_gauss+1) )
+      allocate( wts_1D(0:n_gauss+1) )
+      call gauss_1D_w_ends( n_gauss, pts_1D, wts_1D )
+      n_quad = n_gauss + 2 
+      o = 1 
+    else
+      allocate( pts_1D(n_gauss) )
+      allocate( wts_1D(n_gauss) )
+      call gauss_1D( n_gauss, pts_1D, wts_1D )
+      n_quad = n_gauss
+      o = 0
+    end if
     call quad_ref%destroy()
     call quad_ref%create( n_quad**2 )
     cnt = 0
-    do j = 1, n_quad
-      do i = 1, n_quad
+    do j = 1-o, n_gauss+o
+      do i = 1-o, n_gauss+o
         cnt = cnt + 1
         quad_ref%quad_pts(:,cnt) = [ pts_1D(i), pts_1D(j), zero ]
         quad_ref%quad_wts(cnt) = wts_1D(i)*wts_1D(j)
       end do
     end do
+    deallocate( pts_1D, wts_1D )
   end subroutine create_quad_ref_2D
 
-  pure subroutine create_quad_ref_3D( quad_order, quad_ref )
+  pure subroutine create_quad_ref_3D( quad_order, quad_ref, include_ends )
     integer,      intent(in)  :: quad_order
     type(quad_t), intent(out) :: quad_ref
-    integer :: n_quad
-    integer :: i, j, k, cnt
-    real(dp), dimension( gauss_1D_size( quad_order ) ) :: pts_1D
-    real(dp), dimension( gauss_1D_size( quad_order ) ) :: wts_1D
-    n_quad = gauss_1D_size( quad_order )
-    call gauss_1D(n_quad, pts_1D, wts_1D)
+    logical, optional, intent(in) :: include_ends
+    logical :: include_ends_
+    integer :: n_quad, n_gauss
+    integer :: i, j, k, cnt, o
+    real(dp), dimension(:), allocatable :: pts_1D
+    real(dp), dimension(:), allocatable :: wts_1D
+    include_ends_ =.false.
+    if ( present(include_ends) ) include_ends_ = include_ends
+    n_gauss = gauss_1D_size( quad_order )
+    if (include_ends_) then
+      allocate( pts_1D(0:n_gauss+1) )
+      allocate( wts_1D(0:n_gauss+1) )
+      call gauss_1D_w_ends( n_gauss, pts_1D, wts_1D )
+      n_quad = n_gauss + 2 
+      o = 1 
+    else
+      allocate( pts_1D(n_gauss) )
+      allocate( wts_1D(n_gauss) )
+      call gauss_1D( n_gauss, pts_1D, wts_1D )
+      n_quad = n_gauss
+      o = 0
+    end if
     call quad_ref%destroy()
     call quad_ref%create( n_quad**3 )
     cnt = 0
-    do k = 1, n_quad
-      do j = 1, n_quad
-        do i = 1, n_quad
+    do k = 1-o, n_gauss+o
+      do j = 1-o, n_gauss+o
+        do i = 1-o, n_gauss+o
           cnt = cnt + 1
           quad_ref%quad_pts(:,cnt) = [ pts_1D(i), pts_1D(j), pts_1D(k) ]
           quad_ref%quad_wts(cnt) = wts_1D(i)*wts_1D(j)*wts_1D(k)
         end do
       end do
     end do
+    deallocate( pts_1D, wts_1D )
   end subroutine create_quad_ref_3D
 
   pure subroutine map_quad_ref_to_physical_1D( X1, X2, X3, interpolant, quad_ref, quad_physical )
@@ -3240,6 +2949,7 @@ contains
   end subroutine map_quad_ref_to_physical
 
 end module quadrature_derived_type
+
 module grid_derived_type
   use set_precision,           only : dp
   use quadrature_derived_type, only : quad_t, quad_ptr_3D
@@ -3255,7 +2965,7 @@ module grid_derived_type
   public :: allocate_grid_block, deallocate_grid_block
   public :: allocate_derived_grid, deallocate_derived_grid
 
-  public :: pack_cell_node_coords
+  public :: pack_cell_node_coords, cell_node_coords
   public :: get_face_quad_ptrs
   public :: pack_quadrature_info, pack_quadrature_info_z_order
 
@@ -4853,6 +4563,289 @@ contains
   end function get_error_norm
 
 end module var_rec_block_derived_type
+
+module reconstruction_output
+use set_precision, only : dp
+use set_constants, only : one, zero
+implicit none
+private
+
+contains
+  subroutine output_cell_header_info(base_name,reconstruction, exact, error, tag)
+    use tecplot_output, only : write_tecplot_ordered_zone_header
+    character(*),           intent(in) :: base_name
+    logical,      optional, intent(in) :: reconstruction, exact, error
+    character(*), optional, intent(in) :: tag
+    character(*), dimension(3), parameter :: var_prefix = ['REC','EXT','ERR']
+    character(*), dimension(7), parameter :: var_suffix = ['rho','u  ','v  ','w  ','p  ','t1 ','t2 ']
+
+    character(100), dimension(:),   allocatable :: var_names
+
+    integer :: n_poly_var
+    integer :: ii, jj, cnt
+
+
+    opt = .false.
+    opt(2) = present(exact)
+    opt(3) = present(error)
+    opt(1) = present(reconstruction) .or. ( (.not. opt(2)) .and. (.not. opt(3)) )
+    
+    file_name = trim(job_name)//'-reconstructed'
+    if (present(tag)) then
+      file_name = trim(file_name)//'-'//trim(tag)//'.dat'
+    else
+      file_name = trim(file_name)//'.dat'
+    end if
+
+    n_poly_var = soln%n_total_eqs
+
+    allocate( var_names(  3 + n_poly_var*count(opt) ) )
+    var_names(1) = 'x'
+    var_names(2) = 'y'
+    var_names(3) = 'z'
+    cnt = 3
+    do jj = 1,3
+      if (.not. opt(jj)) cycle
+      do ii = 1,n_poly_var
+        cnt = cnt + 1
+        write(var_names(cnt),'(A)') var_prefix(jj)//':'//trim(var_suffix(ii))
+      end do
+    end do
+
+    open( newunit=fid, file=trim(file_name), status='unknown')
+    call write_tecplot_ordered_zone_header(fid,n_dim,n_nodes,n_node_vars,n_cell_vars, &
+                                           zone_name='CELL',                          &
+                                           var_names=var_names,       &
+                                           date_packing='block' )
+
+    deallocate(var_names)
+  end subroutine output_cell_header_info
+  subroutine output_cell_info( gblock1, gblock, idx, n_skip, quad_order, rec )
+    use grid_derived_type,          only : grid_block, cell_node_coords
+    use var_rec_block_derived_type, only : var_rec_block_t
+    use quadrature_derived_type,    only : quad_t,                                &
+                                        create_quad_ref_1D,                    &
+                                        create_quad_ref_2D,                    &
+                                        create_quad_ref_3D,                    &
+                                        map_quad_ref_to_physical
+    class(grid_block),      intent(in)    :: gblock1, gblock
+    integer, dimension(3),  intent(in)    :: idx, n_skip
+    integer,                intent(in)    :: quad_order
+    class(var_rec_block_t), intent(in)    :: rec
+    type(quad_t) :: ref_quad, phys_quad
+    real(dp), dimension(n_skip(1)+1,n_skip(1)+1,n_skip(1)+1,3) :: coords_tmp
+    integer :: n_quad
+    integer :: status
+    integer, dimension(4) :: bnd_tmp
+    integer, dimension(3) :: idx_tmp, bnd_min, bnd_max, sz, loc
+
+    sz = n_skip + 1
+
+    select case(gblock%n_dim)
+    case(1)
+      call create_quad_ref_1D( quad_order, ref_quad, include_ends=.true. )
+    case(2)
+      call create_quad_ref_2D( quad_order, ref_quad, include_ends=.true. )
+    case(3)
+      call create_quad_ref_3D( quad_order, ref_quad, include_ends=.true. )
+    case default
+      call create_quad_ref_1D( 1, ref_quad )
+    end select
+
+    n_quad = ref_quad%n_quad
+
+    bnd_tmp = lbound(gblock1%node_coords)
+    bnd_min = bnd_tmp(2:4)
+    bnd_tmp = ubound(gblock1%node_coords)
+    bnd_max = bnd_tmp(2:4)
+    loc = 2
+    loc(gblock%n_dim+1:) = 0
+    associate( X1 => coords_tmp(:,:,:,1), &
+               X2 => coords_tmp(:,:,:,2), &
+               X3 => coords_tmp(:,:,:,3), &
+               gv => gblock%grid_vars )
+      idx_tmp = (idx-1)*n_skip + 1
+      coords_tmp = cell_node_coords( idx_tmp, n_skip, bnd_min, bnd_max, gblock1%node_coords )
+      call map_quad_ref_to_physical( X1, X2, X3, loc, gv%interp, ref_quad, phys_quad, status=status )
+      do n = 1,n_quad
+        NODE_DATA(1:3,n) = phys_quad%quad_pts(:,n)
+      end do
+
+    end associate
+  end subroutine output_cell_info
+!   subroutine subcell_to_file( grid, soln, reconstruction, exact, error, tag )
+!     use project_inputs,      only : job_name
+!     use grid_derived_type,   only : grid_type
+!     use soln_derived_type,   only : soln_type
+
+!     type(grid_type),        intent(in) :: grid
+!     type(soln_type),        intent(in) :: soln
+!     logical,      optional, intent(in) :: reconstruction, exact, error
+!     character(*), optional, intent(in) :: tag
+!     integer :: fid, blk
+!     character(100) :: file_name
+!     logical, dimension(3) :: opt
+
+!     character(*), dimension(3), parameter :: var_prefix = ['REC','EXT','ERR']
+!     character(*), dimension(7), parameter :: var_suffix = ['rho','u  ','v  ','w  ','p  ','t1 ','t2 ']
+
+!     character(100), dimension(:),   allocatable :: var_names
+
+!     integer :: n_poly_var
+!     integer :: ii, jj, cnt
+
+
+!     opt = .false.
+!     opt(2) = present(exact)
+!     opt(3) = present(error)
+!     opt(1) = present(reconstruction) .or. ( (.not. opt(2)) .and. (.not. opt(3)) )
+    
+!     file_name = trim(job_name)//'-reconstructed'
+!     if (present(tag)) then
+!       file_name = trim(file_name)//'-'//trim(tag)//'.dat'
+!     else
+!       file_name = trim(file_name)//'.dat'
+!     end if
+
+!     n_poly_var = soln%n_total_eqs
+
+!     allocate( var_names(  3 + n_poly_var*count(opt) ) )
+!     var_names(1) = 'x'
+!     var_names(2) = 'y'
+!     var_names(3) = 'z'
+!     cnt = 3
+!     do jj = 1,3
+!       if (.not. opt(jj)) cycle
+!       do ii = 1,n_poly_var
+!         cnt = cnt + 1
+!         write(var_names(cnt),'(A)') var_prefix(jj)//':'//trim(var_suffix(ii))
+!       end do
+!     end do
+
+!     open( newunit=fid, file=trim(file_name), status='unknown')
+!     call write_tecplot_file_header( fid, var_names )
+
+!     deallocate(var_names)
+
+!     do blk = 1,grid%nblocks
+!       call block_subcell_to_file( fid, grid, soln, blk, opt )
+!     end do
+
+!     close(fid)
+
+!   end subroutine subcell_to_file
+
+!   subroutine block_subcell_to_file( fid, grid, soln, blk, opt )
+
+!     use grid_derived_type,   only : grid_type
+!     use soln_derived_type,   only : soln_type
+
+!     integer,         intent(in) :: fid
+!     type(grid_type), intent(in) :: grid
+!     type(soln_type), intent(in) :: soln
+!     integer,         intent(in) :: blk
+!     logical, dimension(3), intent(in) :: opt
+!     integer :: i, j, k
+
+!     do k = 1,grid%gblock(blk)%k_cells
+!       do j = 1,grid%gblock(blk)%j_cells
+!         do i = 1,grid%gblock(blk)%i_cells
+!           call cell_subcell_to_file( fid, grid, soln, blk, i, j, k, opt )
+!         end do
+!       end do
+!     end do
+
+!   end subroutine block_subcell_to_file
+
+
+!   subroutine cell_subcell_to_file( fid, grid, soln, blk, i, j, k, opt )  
+!     use set_constants,       only : zero, one, half, third
+!     use set_inputs,          only : quad_order, limit_reconstruct
+!     use exact_inputs,        only : use_exact
+!     use grid_derived_type,   only : grid_type
+!     use soln_derived_type,   only : soln_type
+!     use gauss_quadrature_1D, only : gauss_1D_size
+!     use mms_holder,          only : mms
+!     use solution_conversion, only : nondimensional_to_dimensional
+
+!     integer,               intent(in) :: fid
+!     type(grid_type),       intent(in) :: grid
+!     type(soln_type),       intent(in) :: soln
+!     integer,               intent(in) :: blk, i, j, k
+!     logical, dimension(3), intent(in) :: opt
+
+!     character(*), parameter :: flt_fmt = '(ES23.15)'
+!     character(*), parameter :: routine_name='cell_subcell_to_file'
+!     character(100)          :: zone_name
+    
+
+!     real(dp),       dimension(:,:), allocatable :: tmp_var
+!     real(dp),       dimension(:,:), allocatable :: NODE_DATA, CELL_DATA, tmp_NODES
+    
+!     integer, dimension(3) :: n_quad, sz
+!     integer               :: n_nodes, n_turb, n_node_var, n_cell_var, n_poly_var
+!     integer :: ii, jj, cnt, n
+
+!     n_quad    = gauss_1D_size(quad_order)
+!     n_quad(3) = merge( 1, n_quad(3), twod )
+
+!     write(zone_name,'("CELL:[",I0,3(",",I0),"]")') blk, i, j, k
+
+!     n_turb     = soln%n_turb
+!     n_poly_var = size( soln%sblock(blk)%reconstruct(i,j,k)%polynomial%coeff, 1 )
+!     n_node_var = 3 + n_poly_var*count(opt)
+!     n_cell_var = 0
+
+!     sz(1)   = n_quad(1) + 2
+!     sz(2)   = n_quad(2) + 2
+!     sz(3)   = merge( 1, n_quad(3) + 2, twod )
+!     n_nodes = product(sz)
+!     allocate( tmp_NODES( 3, n_nodes ) )
+!     allocate( tmp_var( n_poly_var, 3 ) )
+!     allocate( NODE_DATA( n_node_var, n_nodes ) )
+!     allocate( CELL_DATA( n_cell_var, n_nodes ) )
+
+!     call cat_quads( n_quad, grid, blk, i, j, k, tmp_NODES )
+
+!     do n = 1,n_nodes
+!       tmp_var = -99.0_dp
+!       NODE_DATA( 1:3, n ) = tmp_NODES( 1:3, n )
+!       if ( limit_reconstruct ) then
+!         tmp_var(:,1) = soln%sblock(blk)%reconstruct( i, j, k )%polynomial%evaluate(   &
+!                                                             NODE_DATA( 1:3, n ),     &
+!                                                             soln%sblock(blk)%ho_limiter(:,i,j,k) )
+!       else
+!         tmp_var(:,1) = soln%sblock(blk)%reconstruct( i, j, k )%polynomial%evaluate(   &
+!                                                             NODE_DATA( 1:3, n ) )
+!       end if
+
+!       call nondimensional_to_dimensional( tmp_var(:,1) )
+!       if (use_exact) then
+!         call mms%manufactured_soln%soln( NODE_DATA( 1:3, n ), tmp_var(:,2) )
+!         call nondimensional_to_dimensional( tmp_var(:,2) )
+!         tmp_var(:,3) = tmp_var(:,1) - tmp_var(:,2)
+!       end if
+!       cnt = 3
+!       do jj = 1,3
+!         if (.not. opt(jj)) cycle
+!         do ii = 1,n_poly_var
+!           cnt = cnt + 1
+!           NODE_DATA(cnt,n) = tmp_var(ii,jj)
+!         end do
+!       end do
+
+!     end do
+
+!     call write_tecplot_ordered_zone_header( fid, 3, sz, n_node_var, n_cell_var, zone_name, strand_id=1 )
+
+!     call write_tecplot_ordered_zone_block_packed( fid, flt_fmt, 3, sz,             &
+!                                                   n_node_var, n_cell_var,          &
+!                                                   NODE_DATA, CELL_DATA )
+
+!     deallocate( tmp_var, NODE_DATA, CELL_DATA, tmp_NODES )
+
+!   end subroutine cell_subcell_to_file
+end module reconstruction_output
 
 module test_problem
   use set_precision, only : dp
