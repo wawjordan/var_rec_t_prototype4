@@ -1625,6 +1625,7 @@ module tecplot_output
   implicit none
   private
   public :: write_tecplot_ordered_zone_header
+  public :: write_tecplot_ordered_zone_block_packed
   character(*), dimension(6), parameter :: data_types=['DOUBLE  ','SINGLE  ',  &
                                                        'LONGINT ','SHORTINT',  &
                                                        'BYTE    ','BIT     ' ]
@@ -2646,6 +2647,7 @@ module quadrature_derived_type
   public :: quad_ptr, quad_ptr_3D
   public :: create_quad_ref_1D, create_quad_ref_2D, create_quad_ref_3D
   public :: map_quad_ref_to_physical
+  public :: num_quad_pts
   ! public :: map_quad_ref_to_physical_1D
   ! public :: map_quad_ref_to_physical_2D
   ! public :: map_quad_ref_to_physical_3D
@@ -2725,6 +2727,13 @@ contains
       integral(n) = dot_product(f(n,:),this%quad_wts)
     end do
   end function integrate_vector
+
+  pure function num_quad_pts(quad_order,n_dim,include_ends) result(n_pts)
+    integer, intent(in) :: quad_order, n_dim
+    logical, intent(in) :: include_ends
+    integer, dimension(n_dim) :: n_pts
+    n_pts(1:n_dim) = gauss_1D_size(quad_order) + merge(0,2,include_ends)
+  end function num_quad_pts
 
   pure function gauss_1D_size( polynomial_order ) result( N_quad )
     use set_constants, only : half
@@ -2965,7 +2974,7 @@ module grid_derived_type
   public :: allocate_grid_block, deallocate_grid_block
   public :: allocate_derived_grid, deallocate_derived_grid
 
-  public :: pack_cell_node_coords, cell_node_coords
+  public :: pack_cell_node_coords, get_cell_nodes
   public :: get_face_quad_ptrs
   public :: pack_quadrature_info, pack_quadrature_info_z_order
 
@@ -3087,6 +3096,20 @@ contains
       end do
     end do
   end function pack_cell_node_coords
+
+  pure function get_cell_nodes(gblock,start_idx,n_skip) result(coords_out)
+    type(grid_block),      intent(in) :: gblock
+    integer, dimension(3), intent(in) :: start_idx
+    integer, dimension(3), intent(in) :: n_skip
+    real(dp), dimension(n_skip(1)+1,n_skip(2)+1,n_skip(3)+1,3) :: coords_out
+    integer, dimension(4) :: bnd_tmp
+    integer, dimension(3) :: bnd_min, bnd_max
+    bnd_tmp = lbound(gblock%node_coords)
+    bnd_min = bnd_tmp(2:4)
+    bnd_tmp = ubound(gblock%node_coords)
+    bnd_max = bnd_tmp(2:4)
+    coords_out = cell_node_coords(start_idx,n_skip,bnd_min,bnd_max,gblock%node_coords)
+  end function get_cell_nodes
 
   pure function cell_node_coords(idx,stride,bnd_min,bnd_max,coords_in) result(coords_out)
     integer, dimension(3),                            intent(in)  :: idx, stride, bnd_min, bnd_max
@@ -4565,83 +4588,136 @@ contains
 end module var_rec_block_derived_type
 
 module reconstruction_output
-use set_precision, only : dp
-use set_constants, only : one, zero
-implicit none
-private
+  use set_precision, only : dp
+  use set_constants, only : one, zero
+  implicit none
+  private
 
 contains
-  subroutine output_cell_header_info(base_name,reconstruction, exact, error, tag)
+  subroutine output_cell_reconstruction( gblock1, rec, blk, cell_idx, quad_order, file_name, old, ext_fun, rec_out, ext_out, err_out, n_terms )
+    use index_conversion, only : global2local
+    use quadrature_derived_type, only : num_quad_pts, quad_t
     use tecplot_output, only : write_tecplot_ordered_zone_header
-    character(*),           intent(in) :: base_name
-    logical,      optional, intent(in) :: reconstruction, exact, error
-    character(*), optional, intent(in) :: tag
+    use tecplot_output, only : write_tecplot_ordered_zone_block_packed
+    use var_rec_block_derived_type, only : var_rec_block_t
+    use grid_derived_type,          only : grid_block
+    use function_holder_type,       only : func_h_t
+    type(grid_block),       intent(in)    :: gblock1
+    type(var_rec_block_t),  intent(in)    :: rec
+    integer,                intent(in)    :: blk, cell_idx, quad_order
+    character(*),           intent(in)    :: file_name
+    logical,                intent(inout) :: old
+    class(func_h_t), optional, intent(in) :: ext_fun
+    logical,      optional, intent(in)    :: rec_out, ext_out, err_out
+    integer,      optional, intent(in)    :: n_terms
+    integer, dimension(rec%n_dim) :: idx, n_nodes
+    real(dp), dimension(rec%n_dim) :: x
+    real(dp), dimension(0,0) :: CELL_DATA
+    real(dp), dimension(:,:), allocatable :: NODE_DATA, tmp_var
+    logical, dimension(3) :: opt
+    type(quad_t) :: phys_quad
     character(*), dimension(3), parameter :: var_prefix = ['REC','EXT','ERR']
+    character(*), dimension(3), parameter :: xyz        = ['x','y','z']
     character(*), dimension(7), parameter :: var_suffix = ['rho','u  ','v  ','w  ','p  ','t1 ','t2 ']
-
-    character(100), dimension(:),   allocatable :: var_names
-
-    integer :: n_poly_var
-    integer :: ii, jj, cnt
-
-
-    opt = .false.
-    opt(2) = present(exact)
-    opt(3) = present(error)
-    opt(1) = present(reconstruction) .or. ( (.not. opt(2)) .and. (.not. opt(3)) )
+    character(100), dimension(:), allocatable :: var_names
+    character(100) :: zone_name
     
-    file_name = trim(job_name)//'-reconstructed'
-    if (present(tag)) then
-      file_name = trim(file_name)//'-'//trim(tag)//'.dat'
+
+    integer :: n_dim, n_node_vars, n_cell_vars, n_vars, n_terms_
+    integer :: fid, i, j, cnt
+    logical :: file_exists
+
+    inquire( file=trim(file_name), exist=file_exists )
+    if ( (.not.old).and.(file_exists) ) then
+      open( newunit=fid, file=trim(file_name), status='unknown')
+      old = .true.
     else
-      file_name = trim(file_name)//'.dat'
+      open( newunit=fid, file=trim(file_name), status='old', position='append' )
     end if
 
-    n_poly_var = soln%n_total_eqs
+    n_dim = rec%n_dim
+    write(zone_name,'(A,I0,A)') "('CELL:(',I0,',[',I0,",n_dim-1,"(',',I0),'])')"
+    write(zone_name,trim(zone_name)) blk, global2local(cell_idx,rec%n_cells)
+    
+    opt = .false.
+    if ( present(rec_out) ) opt(1) = rec_out
+    if ( present(ext_fun) ) then
+      if ( present(ext_out) ) opt(2) = ext_out
+      if ( present(err_out) ) opt(3) = err_out
+    end if
+    n_terms_ = rec%p%n_terms
+    if ( present(n_terms) ) n_terms_ = max(min(n_terms_,n_terms),1)
 
-    allocate( var_names(  3 + n_poly_var*count(opt) ) )
-    var_names(1) = 'x'
-    var_names(2) = 'y'
-    var_names(3) = 'z'
-    cnt = 3
-    do jj = 1,3
-      if (.not. opt(jj)) cycle
-      do ii = 1,n_poly_var
+    n_nodes     = num_quad_pts(quad_order,n_dim,.true.)
+    n_node_vars = n_dim + count(opt)*rec%n_vars
+    n_cell_vars = 0
+    n_vars      = n_node_vars + n_cell_vars
+    allocate( var_names( n_vars ) )
+    allocate( tmp_var(   rec%n_vars, 3 ) )
+    allocate( NODE_DATA( n_node_vars, phys_quad%n_quad ) )
+
+    cnt = 0
+    do i = 1,n_dim
+      cnt = cnt + 1
+      var_names(cnt) = xyz(i)
+    end do
+    do j = 1,3
+      if (.not. opt(j)) cycle
+      do i = 1,rec%n_vars
         cnt = cnt + 1
-        write(var_names(cnt),'(A)') var_prefix(jj)//':'//trim(var_suffix(ii))
+        write(var_names(cnt),'(A)') var_prefix(j)//':'//trim(var_suffix(i))
+      end do
+    end do
+    call write_tecplot_ordered_zone_header( fid, n_dim, n_nodes, &
+                                           n_node_vars, n_cell_vars, &
+                                           zone_name=zone_name,      &
+                                           var_names=var_names,      &
+                                           data_packing='block' )
+    call get_cell_quad( gblock1, cell_idx, n_skip, quad_order, phys_quad )
+
+    do n = 1,phys_quad%n_quad
+      x = phys_quad%quad_pts(1:n_dim,n)
+      NODE_DATA( 1:n_dim, n ) = x
+      tmp_var(:,1) = rec%cells(cell_idx)%eval( rec%p, x, n_terms_, rec%n_vars, [(i,i=1,rec%n_vars)] )
+      if ( opt(2) .or. opt(3) ) then
+        tmp_var(:,2) = ext_fun%eval(x)
+        tmp_var(:,3) = tmp_var(:,1) - tmp_var(:,2)
+      end if
+      cnt = n_dim
+      do j = 1,3
+        if (.not. opt(jj)) cycle
+        do i = 1,rec%n_vars
+          cnt = cnt + 1
+          NODE_DATA(cnt,n) = tmp_var(i,j)
+        end do
       end do
     end do
 
-    open( newunit=fid, file=trim(file_name), status='unknown')
-    call write_tecplot_ordered_zone_header(fid,n_dim,n_nodes,n_node_vars,n_cell_vars, &
-                                           zone_name='CELL',                          &
-                                           var_names=var_names,       &
-                                           date_packing='block' )
+    call write_tecplot_ordered_zone_block_packed(fid, n_nodes, n_node_vars, n_cell_vars, NODE_DATA, CELL_DATA )
+    close(fid)
+    deallocate( var_names, tmp_var, NODE_DATA )
+  end subroutine output_cell_reconstruction
 
-    deallocate(var_names)
-  end subroutine output_cell_header_info
-  subroutine output_cell_info( gblock1, gblock, idx, n_skip, quad_order, rec )
-    use grid_derived_type,          only : grid_block, cell_node_coords
-    use var_rec_block_derived_type, only : var_rec_block_t
-    use quadrature_derived_type,    only : quad_t,                                &
+  subroutine get_cell_quad( gblock1, cell_idx, n_skip, quad_order, phys_quad )
+    use grid_derived_type,       only : grid_block, get_cell_nodes
+    use quadrature_derived_type, only : quad_t,                                &
                                         create_quad_ref_1D,                    &
                                         create_quad_ref_2D,                    &
                                         create_quad_ref_3D,                    &
                                         map_quad_ref_to_physical
-    class(grid_block),      intent(in)    :: gblock1, gblock
-    integer, dimension(3),  intent(in)    :: idx, n_skip
-    integer,                intent(in)    :: quad_order
-    class(var_rec_block_t), intent(in)    :: rec
-    type(quad_t) :: ref_quad, phys_quad
+    class(grid_block),                     intent(in)  :: gblock1
+    integer,                               intent(in)  :: quad_order
+    integer,  dimension(gblock1%n_dim),    intent(in)  :: cell_idx, n_skip
+    type(quad_t),                          intent(out) :: phys_quad
+    type(quad_t) :: ref_quad
     real(dp), dimension(n_skip(1)+1,n_skip(1)+1,n_skip(1)+1,3) :: coords_tmp
-    integer :: n_quad
+    integer :: n_quad, n_dim
     integer :: status
     integer, dimension(4) :: bnd_tmp
-    integer, dimension(3) :: idx_tmp, bnd_min, bnd_max, sz, loc
+    integer, dimension(3) :: start_idx, bnd_min, bnd_max, sz, loc
 
-    sz = n_skip + 1
-
-    select case(gblock%n_dim)
+    n_dim = gblock1%n_dim
+    select case(n_dim)
     case(1)
       call create_quad_ref_1D( quad_order, ref_quad, include_ends=.true. )
     case(2)
@@ -4651,28 +4727,66 @@ contains
     case default
       call create_quad_ref_1D( 1, ref_quad )
     end select
+    start_idx = 1
+    start_idx(1:n_dim) = (cell_idx(1:n_dim)-1)*n_skip(1:n_dim) + 1
 
-    n_quad = ref_quad%n_quad
+    coords_tmp = get_cell_nodes(gblock1,start_idx,n_skip)
 
-    bnd_tmp = lbound(gblock1%node_coords)
-    bnd_min = bnd_tmp(2:4)
-    bnd_tmp = ubound(gblock1%node_coords)
-    bnd_max = bnd_tmp(2:4)
     loc = 2
-    loc(gblock%n_dim+1:) = 0
+    loc(n_dim+1:) = 0
+
     associate( X1 => coords_tmp(:,:,:,1), &
                X2 => coords_tmp(:,:,:,2), &
                X3 => coords_tmp(:,:,:,3), &
-               gv => gblock%grid_vars )
-      idx_tmp = (idx-1)*n_skip + 1
-      coords_tmp = cell_node_coords( idx_tmp, n_skip, bnd_min, bnd_max, gblock1%node_coords )
+               gv => gblock1%grid_vars )
       call map_quad_ref_to_physical( X1, X2, X3, loc, gv%interp, ref_quad, phys_quad, status=status )
-      do n = 1,n_quad
-        NODE_DATA(1:3,n) = phys_quad%quad_pts(:,n)
-      end do
-
     end associate
-  end subroutine output_cell_info
+  end subroutine get_cell_quad
+
+  subroutine output_cell_data( gblock1, rec, cell_idx, quad_order, file_name, rec_out, ext_out, err_out )
+    use index_conversion, only : global2local
+    use grid_derived_type,       only : grid_block
+    use quadrature_derived_type, only : num_quad_pts
+    use tecplot_output, only : write_tecplot_ordered_zone_block_packed
+    use var_rec_block_derived_type, only : var_rec_block_t
+    type(grid_block),      intent(in)    :: gblock1
+    type(var_rec_block_t), intent(in)    :: rec
+    integer,               intent(in)    :: cell_idx, quad_order
+    character(*),          intent(in)    :: file_name
+    logical,     optional, intent(in)    :: rec_out, ext_out, err_out
+    integer, dimension(rec%n_dim) :: idx, n_nodes
+    logical, dimension(3) :: opt
+    integer :: n_dim, n_node_vars, n_cell_vars, n_vars
+    integer :: fid, i, j, cnt
+    logical :: file_exists
+
+    n_dim = rec%n_dim
+
+    open( newunit=fid, file=trim(file_name), status='old', position='append' )
+
+    opt = .false.
+    if ( present(rec_out) ) opt(1) = rec_out
+    if ( present(ext_out) ) opt(2) = ext_out
+    if ( present(err_out) ) opt(3) = err_out
+
+    n_nodes     = num_quad_pts(quad_order,n_dim,.true.)
+    n_node_vars = n_dim
+    n_cell_vars = count(opt)*rec%n_vars
+    n_vars      = n_node_vars + n_cell_vars
+    call write_tecplot_ordered_zone_block_packed(fid,)
+  end subroutine output_cell_header_info
+
+  
+  ! subroutine output_cell_info( gblock1, gblock, idx, n_skip, quad_order, rec )
+  !   use grid_derived_type,          only : grid_block, get_cell_nodes
+  !   use var_rec_block_derived_type, only : var_rec_block_t
+  !   use quadrature_derived_type,    only : quad_t,                                &
+  !                                       create_quad_ref_1D,                    &
+  !                                       create_quad_ref_2D,                    &
+  !                                       create_quad_ref_3D,                    &
+  !                                       map_quad_ref_to_physical
+    
+  ! end subroutine output_cell_info
 !   subroutine subcell_to_file( grid, soln, reconstruction, exact, error, tag )
 !     use project_inputs,      only : job_name
 !     use grid_derived_type,   only : grid_type
