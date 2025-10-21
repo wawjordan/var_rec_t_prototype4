@@ -1935,10 +1935,11 @@ contains
     end if
 
     write( fid, *     )
-    write( fid, '(A)' ) trim( zone_fmt )
-    write( fid, '(A)' ) trim( size_fmt )
     if ( present(var_names) ) write( fid, '(A)' ) trim( var_fmt )
+    write( fid, '(A)' ) trim( zone_fmt )
     if ( present(var_share) ) write( fid, '(A)' ) trim( var_share_fmt )
+    write( fid, '(A)' ) trim( size_fmt )
+    if ( present(data_packing) ) write(fid,'(A)' ) trim( pack_fmt )
     write( fid, '(A)' ) trim( loc_fmt   )
     write( fid, '(A)' ) trim( type_fmt  )
 
@@ -2732,7 +2733,7 @@ contains
     integer, intent(in) :: quad_order, n_dim
     logical, intent(in) :: include_ends
     integer, dimension(n_dim) :: n_pts
-    n_pts(1:n_dim) = gauss_1D_size(quad_order) + merge(0,2,include_ends)
+    n_pts(1:n_dim) = gauss_1D_size(quad_order) + merge(2,0,include_ends)
   end function num_quad_pts
 
   pure function gauss_1D_size( polynomial_order ) result( N_quad )
@@ -3709,20 +3710,20 @@ contains
           this%d(:,n) = space_coefs(:,cnt)
         end do
       end if
-      if ( present(space_scale) ) then
-        this%dx = sign(one,space_scale) * max(near_zero,abs(space_scale))
-      end if
-      if ( present(space_origin) ) this%x0 = space_origin
       if ( present(time_coefs)   ) then
         this%e  = time_coefs(:,1)
         this%f  = time_coefs(:,2)
         this%g  = time_coefs(:,3)
       end if
-      if ( present(time_scale) ) then
-        this%dt = sign(one,time_scale) * max(near_zero,abs(time_scale))
-      end if
-      if ( present(time_origin) ) this%t0 = time_origin
     end if
+    if ( present(space_scale) ) then
+      this%dx = sign(one,space_scale) * max(near_zero,abs(space_scale))
+    end if
+    if ( present(space_origin) ) this%x0 = space_origin
+    if ( present(time_scale) ) then
+      this%dt = sign(one,time_scale) * max(near_zero,abs(time_scale))
+    end if
+    if ( present(time_origin) ) this%t0 = time_origin
   end function constructor
 
   pure elemental subroutine destroy_cts(this)
@@ -4141,6 +4142,7 @@ module var_rec_block_derived_type
     private
     procedure, public, pass :: destroy => destroy_var_rec_block_t
     procedure, public, pass :: solve   => perform_iterative_reconstruction_SOR
+    procedure, public, pass :: eval    => evaluate_block_rec_cell
     procedure, public, pass :: set_cell_avgs, init_cells
     procedure, public, pass :: get_cell_error, get_error_norm
     procedure,         pass :: get_cell_LHS, get_cell_RHS
@@ -4213,6 +4215,25 @@ contains
       this%cells(n) = var_rec_cell_t( this%p, block_num, n, nbor_block, nbor_cell_idx, nbor_face_id, n_interior, n_var, grid%gblock(block_num)%grid_vars%quad( idx_tmp(1), idx_tmp(2), idx_tmp(3) ), h_ref )
     end do
   end function constructor
+
+  pure function evaluate_block_rec_cell( this, cell_idx, x, vars, n_terms ) result(val)
+    use index_conversion, only : local2global
+    class(var_rec_block_t), intent(in) :: this
+    integer, dimension(:),  intent(in) :: cell_idx
+    real(dp), dimension(:), intent(in) :: x
+    integer, dimension(:),  intent(in) :: vars
+    integer, optional,      intent(in) :: n_terms
+    real(dp), dimension(size(vars))    :: val
+    integer :: n_terms_, n_vars, lin_idx
+
+    n_vars = size(vars)
+    n_terms_ = this%p%n_terms
+    if ( present(n_terms) ) n_terms_ = max(min(n_terms_,n_terms),1)
+
+    lin_idx = local2global( cell_idx(1:this%n_dim), this%n_cells )
+
+    val = this%cells(lin_idx)%eval( this%p, x, n_terms_, n_vars, vars )
+  end function evaluate_block_rec_cell
 
   subroutine get_cell_LHS( this, grid, lin_idx, term_start, term_end )
     use set_constants,           only : zero
@@ -4587,30 +4608,212 @@ contains
 
 end module var_rec_block_derived_type
 
+module var_rec_derived_type
+  use set_precision,              only : dp
+  use var_rec_block_derived_type, only : var_rec_block_t
+  use function_holder_type,       only : func_h_t
+  implicit none
+  private
+  public :: var_rec_t
+
+  type :: var_rec_t
+    private
+    integer,                                          public :: n_blocks, n_dim, n_vars, degree
+    type(var_rec_block_t), dimension(:), allocatable, public :: b
+  contains
+    private
+    procedure, public, pass :: destroy => destroy_var_rec_t
+    procedure, public, pass :: solve   => iterative_solve
+    procedure, public, pass :: eval    => evaluate_reconstruction
+  end type var_rec_t
+
+  interface var_rec_t
+    module procedure constructor
+  end interface var_rec_t
+contains
+  pure elemental subroutine destroy_var_rec_t( this )
+    class(var_rec_t), intent(inout) :: this
+    if ( allocated(this%b) ) then
+      call this%b%destroy()
+      deallocate( this%b )
+    end if
+    this%n_blocks = 0
+    this%n_dim    = 0
+    this%n_vars   = 0
+    this%degree   = 0
+  end subroutine destroy_var_rec_t
+
+  function constructor( grid, n_dim, degree, n_vars, ext_fun ) result(this)
+    use grid_derived_type, only : grid_type
+    use var_rec_block_derived_type, only : var_rec_block_t
+    use function_holder_type,       only : func_h_t
+    type(grid_type),                 intent(in) :: grid
+    integer,                         intent(in) :: n_dim, degree, n_vars
+    ! integer, dimension(:), optional, intent(in) :: n_skip
+    class(func_h_t), optional,       intent(in) :: ext_fun
+    type(var_rec_t) :: this
+    ! integer, dimension(n_dim) :: n_skip_
+    integer :: i, n
+    call this%destroy()
+
+    ! n_skip_ = 1
+    ! if ( present(n_skip) ) n_skip_ = n_skip
+
+    this%n_dim    = n_dim
+    this%n_vars   = n_vars
+    this%degree   = degree
+    this%n_blocks = grid%n_blocks
+
+    allocate( this%b(this%n_blocks) )
+    do i = 1,this%n_blocks
+      this%b(i) = var_rec_block_t( grid, i, n_dim, degree, n_vars )
+    end do
+
+    if ( present(ext_fun) ) then
+      do i = 1,this%n_blocks
+        call this%b(i)%set_cell_avgs(grid%gblock(i),n_vars,[(n,n=1,n_vars)],ext_fun)
+      end do
+    end if
+  end function constructor
+
+  pure function evaluate_reconstruction( this, blk, cell_idx, x, vars, n_terms ) result(val)
+    use index_conversion, only : local2global
+    class(var_rec_t), intent(in) :: this
+    integer,                intent(in) :: blk
+    integer, dimension(:),  intent(in) :: cell_idx
+    real(dp), dimension(:), intent(in) :: x
+    integer, dimension(:),  intent(in) :: vars
+    integer, optional,      intent(in) :: n_terms
+    real(dp), dimension(size(vars))    :: val
+    integer :: n_vars
+
+    n_vars = size(vars)
+    if ( present(n_terms) ) then
+      val = this%b(blk)%eval(cell_idx, x, vars, n_terms=n_terms )
+    else
+      val = this%b(blk)%eval(cell_idx, x, vars )
+    end if
+  end function evaluate_reconstruction
+
+  subroutine iterative_solve(this,grid,ext_fun,final_degree,ramp,omega,tol,n_iter)
+    use combinatorics, only : nchoosek
+    use grid_derived_type, only : grid_type
+    use function_holder_type, only : func_h_t
+    class(var_rec_t), intent(inout) :: this
+    type(grid_type),  intent(in)    :: grid
+    class(func_h_t), optional, intent(in) :: ext_fun
+    integer,         optional, intent(in) :: final_degree
+    logical,         optional, intent(in) :: ramp
+    real(dp),        optional, intent(in) :: omega, tol
+    integer,         optional, intent(in) :: n_iter
+    real(dp), dimension(this%n_vars, 3) :: error_norms
+    integer :: i, blk, n, v
+    integer :: term_start, term_end, degree_start, degree_end, n_vars
+    logical :: converged
+
+    degree_start = this%degree
+    degree_end   = this%degree
+    n_vars = this%n_vars
+    
+    if ( present( final_degree ) ) degree_end = final_degree
+    if ( present( ramp) ) then
+      if ( ramp ) degree_start = 1
+    end if
+
+    do i = degree_start, degree_end
+      term_start = 1
+      term_end   = nchoosek( this%n_dim + i, i )
+      write(*,'(A,I0)') "reconstructing: p=",i 
+      do blk = 1, this%n_blocks
+        call this%b(blk)%init_cells(grid,term_start,term_end,n_vars,[(n,n=1,n_vars)])
+        call this%b(blk)%solve(term_start,term_end,n_vars,[(n,n=1,n_vars)],omega=omega,tol=tol,n_iter=n_iter,converged=converged)
+        write(*,*)
+        write(*,'(A,I0,A,L1)') 'Block ', blk, ': converged =', converged
+        if ( present(ext_fun) ) then
+          error_norms = this%b(blk)%get_error_norm(grid%gblock(blk),[(n,n=1,n_vars)],term_end,[1,2,huge(1)],ext_fun)
+          write(*,'(A,I0,A)') 'Block ', blk, ' error norms: '
+          do v = 1,n_vars
+            write(*,'(I0,3(" ",ES18.12))') v, (error_norms(v,n), n = 1,3)
+          end do
+        end if
+      end do
+    end do
+  end subroutine iterative_solve
+
+end module var_rec_derived_type
+
+
+
 module reconstruction_output
   use set_precision, only : dp
   use set_constants, only : one, zero
   implicit none
   private
 
+  public :: output_cell_reconstruction
+  public :: output_block_reconstruction
 contains
-  subroutine output_cell_reconstruction( gblock1, rec, blk, cell_idx, quad_order, file_name, old, ext_fun, rec_out, ext_out, err_out, n_terms )
+  subroutine output_block_reconstruction( gblock1, rec, blk, base_name, old, n_skip, quad_order, ext_fun, rec_out, ext_out, err_out, n_terms, tag )
+    use set_constants, only : max_text_line_length
     use index_conversion, only : global2local
+    use var_rec_block_derived_type, only : var_rec_block_t
+    use grid_derived_type,          only : grid_block
+    use function_holder_type,       only : func_h_t
+    type(grid_block),                intent(in)    :: gblock1
+    type(var_rec_block_t),           intent(in)    :: rec
+    integer,                         intent(in)    :: blk
+    character(*),                    intent(in)    :: base_name
+    logical,                         intent(inout) :: old
+    integer, dimension(:), optional, intent(in)    :: n_skip
+    integer,               optional, intent(in)    :: quad_order
+    class(func_h_t),       optional, intent(in)    :: ext_fun
+    logical,               optional, intent(in)    :: rec_out, ext_out, err_out
+    integer,               optional, intent(in)    :: n_terms
+    character(*),          optional, intent(in)    :: tag
+    character(max_text_line_length) :: file_name
+    integer :: i
+    file_name = trim(base_name)//'-reconstructed'
+    if (present(tag)) then
+      file_name = trim(file_name)//'-'//trim(tag)//'.dat'
+    else
+      file_name = trim(file_name)//'.dat'
+    end if
+
+    do i = 1,rec%n_cells_total
+      call output_cell_reconstruction( gblock1, rec, blk, &
+                                       global2local(i,rec%n_cells), &
+                                       file_name, old,              &
+                                       n_skip=n_skip,               &
+                                       quad_order=quad_order,       &
+                                       ext_fun=ext_fun,             &
+                                       rec_out=rec_out,             &
+                                       ext_out=ext_out,             &
+                                       err_out=err_out,             &
+                                       n_terms=n_terms )
+    end do
+  end subroutine output_block_reconstruction
+  subroutine output_cell_reconstruction( gblock1, rec, blk, cell_idx, file_name, old, n_skip, quad_order, ext_fun, rec_out, ext_out, err_out, n_terms )
+    use index_conversion, only : local2global
     use quadrature_derived_type, only : num_quad_pts, quad_t
     use tecplot_output, only : write_tecplot_ordered_zone_header
     use tecplot_output, only : write_tecplot_ordered_zone_block_packed
     use var_rec_block_derived_type, only : var_rec_block_t
     use grid_derived_type,          only : grid_block
     use function_holder_type,       only : func_h_t
-    type(grid_block),       intent(in)    :: gblock1
-    type(var_rec_block_t),  intent(in)    :: rec
-    integer,                intent(in)    :: blk, cell_idx, quad_order
-    character(*),           intent(in)    :: file_name
-    logical,                intent(inout) :: old
-    class(func_h_t), optional, intent(in) :: ext_fun
-    logical,      optional, intent(in)    :: rec_out, ext_out, err_out
-    integer,      optional, intent(in)    :: n_terms
-    integer, dimension(rec%n_dim) :: idx, n_nodes
+    type(grid_block),                intent(in)    :: gblock1
+    type(var_rec_block_t),           intent(in)    :: rec
+    integer,                         intent(in)    :: blk
+    integer, dimension(:),           intent(in)    :: cell_idx
+    character(*),                    intent(in)    :: file_name
+    logical,                         intent(inout) :: old
+    integer, dimension(:), optional, intent(in)    :: n_skip
+    integer,               optional, intent(in)    :: quad_order
+    class(func_h_t),       optional, intent(in)    :: ext_fun
+    logical,               optional, intent(in)    :: rec_out, ext_out, err_out
+    integer,               optional, intent(in)    :: n_terms
+    integer :: quad_order_, lin_idx
+    integer,  dimension(rec%n_dim) :: n_nodes
+    integer, dimension(3) :: n_skip_
     real(dp), dimension(rec%n_dim) :: x
     real(dp), dimension(0,0) :: CELL_DATA
     real(dp), dimension(:,:), allocatable :: NODE_DATA, tmp_var
@@ -4624,21 +4827,23 @@ contains
     
 
     integer :: n_dim, n_node_vars, n_cell_vars, n_vars, n_terms_
-    integer :: fid, i, j, cnt
+    integer :: fid, n, i, j, cnt
     logical :: file_exists
 
-    inquire( file=trim(file_name), exist=file_exists )
-    if ( (.not.old).and.(file_exists) ) then
-      open( newunit=fid, file=trim(file_name), status='unknown')
-      old = .true.
-    else
-      open( newunit=fid, file=trim(file_name), status='old', position='append' )
-    end if
-
     n_dim = rec%n_dim
-    write(zone_name,'(A,I0,A)') "('CELL:(',I0,',[',I0,",n_dim-1,"(',',I0),'])')"
-    write(zone_name,trim(zone_name)) blk, global2local(cell_idx,rec%n_cells)
-    
+
+    lin_idx = local2global(cell_idx(1:n_dim),rec%n_cells)
+
+    n_skip_ = 1
+    if ( present(n_skip) ) n_skip_(1:n_dim) = n_skip(1:n_dim)
+
+    quad_order_ = 1
+    if ( present(quad_order) ) quad_order_ = quad_order
+
+    call get_cell_quad( gblock1, cell_idx, n_skip_, quad_order_, phys_quad )
+
+    n_nodes     = num_quad_pts(quad_order_,n_dim,.true.)
+
     opt = .false.
     if ( present(rec_out) ) opt(1) = rec_out
     if ( present(ext_fun) ) then
@@ -4648,13 +4853,17 @@ contains
     n_terms_ = rec%p%n_terms
     if ( present(n_terms) ) n_terms_ = max(min(n_terms_,n_terms),1)
 
-    n_nodes     = num_quad_pts(quad_order,n_dim,.true.)
+    
     n_node_vars = n_dim + count(opt)*rec%n_vars
     n_cell_vars = 0
     n_vars      = n_node_vars + n_cell_vars
+
     allocate( var_names( n_vars ) )
     allocate( tmp_var(   rec%n_vars, 3 ) )
     allocate( NODE_DATA( n_node_vars, phys_quad%n_quad ) )
+
+    write(zone_name,'(A,I0,A)') "('CELL:(',I0,',[',I0,",n_dim-1,"(',',I0),'])')"
+    write(zone_name,trim(zone_name)) blk, cell_idx(1:n_dim)
 
     cnt = 0
     do i = 1,n_dim
@@ -4668,31 +4877,42 @@ contains
         write(var_names(cnt),'(A)') var_prefix(j)//':'//trim(var_suffix(i))
       end do
     end do
-    call write_tecplot_ordered_zone_header( fid, n_dim, n_nodes, &
-                                           n_node_vars, n_cell_vars, &
-                                           zone_name=zone_name,      &
-                                           var_names=var_names,      &
-                                           data_packing='block' )
-    call get_cell_quad( gblock1, cell_idx, n_skip, quad_order, phys_quad )
 
     do n = 1,phys_quad%n_quad
       x = phys_quad%quad_pts(1:n_dim,n)
       NODE_DATA( 1:n_dim, n ) = x
-      tmp_var(:,1) = rec%cells(cell_idx)%eval( rec%p, x, n_terms_, rec%n_vars, [(i,i=1,rec%n_vars)] )
+      tmp_var(:,1) = rec%eval( cell_idx, x, [(i,i=1,rec%n_vars)], n_terms=n_terms_ )
       if ( opt(2) .or. opt(3) ) then
         tmp_var(:,2) = ext_fun%eval(x)
         tmp_var(:,3) = tmp_var(:,1) - tmp_var(:,2)
       end if
       cnt = n_dim
       do j = 1,3
-        if (.not. opt(jj)) cycle
+        if (.not. opt(j)) cycle
         do i = 1,rec%n_vars
           cnt = cnt + 1
           NODE_DATA(cnt,n) = tmp_var(i,j)
         end do
       end do
     end do
+    
+    inquire( file=trim(file_name), exist=file_exists )
+    if ( file_exists ) then
+      if (.not.old) then
+        open( newunit=fid, file=trim(file_name), status='unknown')
+      else
+        open( newunit=fid, file=trim(file_name), status='old', position='append' )
+      end if
+    else
+      open( newunit=fid, file=trim(file_name), status='unknown')
+    end if
+    old = .true.
 
+    call write_tecplot_ordered_zone_header( fid, n_dim, n_nodes, &
+                                           n_node_vars, n_cell_vars, &
+                                           zone_name=zone_name,      &
+                                           var_names=var_names,      &
+                                           data_packing='block' )
     call write_tecplot_ordered_zone_block_packed(fid, n_nodes, n_node_vars, n_cell_vars, NODE_DATA, CELL_DATA )
     close(fid)
     deallocate( var_names, tmp_var, NODE_DATA )
@@ -4707,10 +4927,10 @@ contains
                                         map_quad_ref_to_physical
     class(grid_block),                     intent(in)  :: gblock1
     integer,                               intent(in)  :: quad_order
-    integer,  dimension(gblock1%n_dim),    intent(in)  :: cell_idx, n_skip
+    integer,  dimension(:),                intent(in)  :: cell_idx, n_skip
     type(quad_t),                          intent(out) :: phys_quad
     type(quad_t) :: ref_quad
-    real(dp), dimension(n_skip(1)+1,n_skip(1)+1,n_skip(1)+1,3) :: coords_tmp
+    real(dp), dimension(n_skip(1)+1,n_skip(2)+1,n_skip(3)+1,3) :: coords_tmp
     integer :: n_quad, n_dim
     integer :: status
     integer, dimension(4) :: bnd_tmp
@@ -4742,230 +4962,13 @@ contains
       call map_quad_ref_to_physical( X1, X2, X3, loc, gv%interp, ref_quad, phys_quad, status=status )
     end associate
   end subroutine get_cell_quad
-
-  subroutine output_cell_data( gblock1, rec, cell_idx, quad_order, file_name, rec_out, ext_out, err_out )
-    use index_conversion, only : global2local
-    use grid_derived_type,       only : grid_block
-    use quadrature_derived_type, only : num_quad_pts
-    use tecplot_output, only : write_tecplot_ordered_zone_block_packed
-    use var_rec_block_derived_type, only : var_rec_block_t
-    type(grid_block),      intent(in)    :: gblock1
-    type(var_rec_block_t), intent(in)    :: rec
-    integer,               intent(in)    :: cell_idx, quad_order
-    character(*),          intent(in)    :: file_name
-    logical,     optional, intent(in)    :: rec_out, ext_out, err_out
-    integer, dimension(rec%n_dim) :: idx, n_nodes
-    logical, dimension(3) :: opt
-    integer :: n_dim, n_node_vars, n_cell_vars, n_vars
-    integer :: fid, i, j, cnt
-    logical :: file_exists
-
-    n_dim = rec%n_dim
-
-    open( newunit=fid, file=trim(file_name), status='old', position='append' )
-
-    opt = .false.
-    if ( present(rec_out) ) opt(1) = rec_out
-    if ( present(ext_out) ) opt(2) = ext_out
-    if ( present(err_out) ) opt(3) = err_out
-
-    n_nodes     = num_quad_pts(quad_order,n_dim,.true.)
-    n_node_vars = n_dim
-    n_cell_vars = count(opt)*rec%n_vars
-    n_vars      = n_node_vars + n_cell_vars
-    call write_tecplot_ordered_zone_block_packed(fid,)
-  end subroutine output_cell_header_info
-
-  
-  ! subroutine output_cell_info( gblock1, gblock, idx, n_skip, quad_order, rec )
-  !   use grid_derived_type,          only : grid_block, get_cell_nodes
-  !   use var_rec_block_derived_type, only : var_rec_block_t
-  !   use quadrature_derived_type,    only : quad_t,                                &
-  !                                       create_quad_ref_1D,                    &
-  !                                       create_quad_ref_2D,                    &
-  !                                       create_quad_ref_3D,                    &
-  !                                       map_quad_ref_to_physical
-    
-  ! end subroutine output_cell_info
-!   subroutine subcell_to_file( grid, soln, reconstruction, exact, error, tag )
-!     use project_inputs,      only : job_name
-!     use grid_derived_type,   only : grid_type
-!     use soln_derived_type,   only : soln_type
-
-!     type(grid_type),        intent(in) :: grid
-!     type(soln_type),        intent(in) :: soln
-!     logical,      optional, intent(in) :: reconstruction, exact, error
-!     character(*), optional, intent(in) :: tag
-!     integer :: fid, blk
-!     character(100) :: file_name
-!     logical, dimension(3) :: opt
-
-!     character(*), dimension(3), parameter :: var_prefix = ['REC','EXT','ERR']
-!     character(*), dimension(7), parameter :: var_suffix = ['rho','u  ','v  ','w  ','p  ','t1 ','t2 ']
-
-!     character(100), dimension(:),   allocatable :: var_names
-
-!     integer :: n_poly_var
-!     integer :: ii, jj, cnt
-
-
-!     opt = .false.
-!     opt(2) = present(exact)
-!     opt(3) = present(error)
-!     opt(1) = present(reconstruction) .or. ( (.not. opt(2)) .and. (.not. opt(3)) )
-    
-!     file_name = trim(job_name)//'-reconstructed'
-!     if (present(tag)) then
-!       file_name = trim(file_name)//'-'//trim(tag)//'.dat'
-!     else
-!       file_name = trim(file_name)//'.dat'
-!     end if
-
-!     n_poly_var = soln%n_total_eqs
-
-!     allocate( var_names(  3 + n_poly_var*count(opt) ) )
-!     var_names(1) = 'x'
-!     var_names(2) = 'y'
-!     var_names(3) = 'z'
-!     cnt = 3
-!     do jj = 1,3
-!       if (.not. opt(jj)) cycle
-!       do ii = 1,n_poly_var
-!         cnt = cnt + 1
-!         write(var_names(cnt),'(A)') var_prefix(jj)//':'//trim(var_suffix(ii))
-!       end do
-!     end do
-
-!     open( newunit=fid, file=trim(file_name), status='unknown')
-!     call write_tecplot_file_header( fid, var_names )
-
-!     deallocate(var_names)
-
-!     do blk = 1,grid%nblocks
-!       call block_subcell_to_file( fid, grid, soln, blk, opt )
-!     end do
-
-!     close(fid)
-
-!   end subroutine subcell_to_file
-
-!   subroutine block_subcell_to_file( fid, grid, soln, blk, opt )
-
-!     use grid_derived_type,   only : grid_type
-!     use soln_derived_type,   only : soln_type
-
-!     integer,         intent(in) :: fid
-!     type(grid_type), intent(in) :: grid
-!     type(soln_type), intent(in) :: soln
-!     integer,         intent(in) :: blk
-!     logical, dimension(3), intent(in) :: opt
-!     integer :: i, j, k
-
-!     do k = 1,grid%gblock(blk)%k_cells
-!       do j = 1,grid%gblock(blk)%j_cells
-!         do i = 1,grid%gblock(blk)%i_cells
-!           call cell_subcell_to_file( fid, grid, soln, blk, i, j, k, opt )
-!         end do
-!       end do
-!     end do
-
-!   end subroutine block_subcell_to_file
-
-
-!   subroutine cell_subcell_to_file( fid, grid, soln, blk, i, j, k, opt )  
-!     use set_constants,       only : zero, one, half, third
-!     use set_inputs,          only : quad_order, limit_reconstruct
-!     use exact_inputs,        only : use_exact
-!     use grid_derived_type,   only : grid_type
-!     use soln_derived_type,   only : soln_type
-!     use gauss_quadrature_1D, only : gauss_1D_size
-!     use mms_holder,          only : mms
-!     use solution_conversion, only : nondimensional_to_dimensional
-
-!     integer,               intent(in) :: fid
-!     type(grid_type),       intent(in) :: grid
-!     type(soln_type),       intent(in) :: soln
-!     integer,               intent(in) :: blk, i, j, k
-!     logical, dimension(3), intent(in) :: opt
-
-!     character(*), parameter :: flt_fmt = '(ES23.15)'
-!     character(*), parameter :: routine_name='cell_subcell_to_file'
-!     character(100)          :: zone_name
-    
-
-!     real(dp),       dimension(:,:), allocatable :: tmp_var
-!     real(dp),       dimension(:,:), allocatable :: NODE_DATA, CELL_DATA, tmp_NODES
-    
-!     integer, dimension(3) :: n_quad, sz
-!     integer               :: n_nodes, n_turb, n_node_var, n_cell_var, n_poly_var
-!     integer :: ii, jj, cnt, n
-
-!     n_quad    = gauss_1D_size(quad_order)
-!     n_quad(3) = merge( 1, n_quad(3), twod )
-
-!     write(zone_name,'("CELL:[",I0,3(",",I0),"]")') blk, i, j, k
-
-!     n_turb     = soln%n_turb
-!     n_poly_var = size( soln%sblock(blk)%reconstruct(i,j,k)%polynomial%coeff, 1 )
-!     n_node_var = 3 + n_poly_var*count(opt)
-!     n_cell_var = 0
-
-!     sz(1)   = n_quad(1) + 2
-!     sz(2)   = n_quad(2) + 2
-!     sz(3)   = merge( 1, n_quad(3) + 2, twod )
-!     n_nodes = product(sz)
-!     allocate( tmp_NODES( 3, n_nodes ) )
-!     allocate( tmp_var( n_poly_var, 3 ) )
-!     allocate( NODE_DATA( n_node_var, n_nodes ) )
-!     allocate( CELL_DATA( n_cell_var, n_nodes ) )
-
-!     call cat_quads( n_quad, grid, blk, i, j, k, tmp_NODES )
-
-!     do n = 1,n_nodes
-!       tmp_var = -99.0_dp
-!       NODE_DATA( 1:3, n ) = tmp_NODES( 1:3, n )
-!       if ( limit_reconstruct ) then
-!         tmp_var(:,1) = soln%sblock(blk)%reconstruct( i, j, k )%polynomial%evaluate(   &
-!                                                             NODE_DATA( 1:3, n ),     &
-!                                                             soln%sblock(blk)%ho_limiter(:,i,j,k) )
-!       else
-!         tmp_var(:,1) = soln%sblock(blk)%reconstruct( i, j, k )%polynomial%evaluate(   &
-!                                                             NODE_DATA( 1:3, n ) )
-!       end if
-
-!       call nondimensional_to_dimensional( tmp_var(:,1) )
-!       if (use_exact) then
-!         call mms%manufactured_soln%soln( NODE_DATA( 1:3, n ), tmp_var(:,2) )
-!         call nondimensional_to_dimensional( tmp_var(:,2) )
-!         tmp_var(:,3) = tmp_var(:,1) - tmp_var(:,2)
-!       end if
-!       cnt = 3
-!       do jj = 1,3
-!         if (.not. opt(jj)) cycle
-!         do ii = 1,n_poly_var
-!           cnt = cnt + 1
-!           NODE_DATA(cnt,n) = tmp_var(ii,jj)
-!         end do
-!       end do
-
-!     end do
-
-!     call write_tecplot_ordered_zone_header( fid, 3, sz, n_node_var, n_cell_var, zone_name, strand_id=1 )
-
-!     call write_tecplot_ordered_zone_block_packed( fid, flt_fmt, 3, sz,             &
-!                                                   n_node_var, n_cell_var,          &
-!                                                   NODE_DATA, CELL_DATA )
-
-!     deallocate( tmp_var, NODE_DATA, CELL_DATA, tmp_NODES )
-
-!   end subroutine cell_subcell_to_file
 end module reconstruction_output
 
 module test_problem
   use set_precision, only : dp
   implicit none
   private
-  public :: setup_grid_and_rec
+  public :: setup_grid_and_rec, setup_grid_and_rec_2
   public :: test_function_1, test_function_2
 contains
 
@@ -4992,51 +4995,32 @@ contains
     ! val(1) = sin(pi*x(1)) * sin(pi*x(2))
   end function test_function_2
 
-  subroutine setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
+  subroutine setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec, eval_fun )
     use combinatorics, only : nchoosek
-    ! use math, only : maximal_extents
-    ! use grid_derived_type, only : pack_cell_node_coords
     use grid_derived_type,           only : grid_type
     use var_rec_block_derived_type,  only : var_rec_block_t
-    ! use var_rec_block_derived_type,  only : spatial_function 
     use monomial_basis_derived_type, only : monomial_basis_t
     use linspace_helper,             only : unit_cartesian_mesh_cat
     use linspace_helper,             only : unit_cartesian_mesh_cat_perturbed
-    use cross_term_sinusoid,         only : cts_t
+    use function_holder_type,        only : func_h_t
     integer,                     intent(in)  :: n_dim, n_vars, degree
     integer, dimension(3),       intent(in)  :: n_nodes, n_ghost
     type(grid_type),             intent(out) :: grid
     type(var_rec_block_t),       intent(out) :: rec
+    class(func_h_t), optional, intent(in)  :: eval_fun
     logical :: converged
     integer :: block_num, term_start, term_end
     integer :: n, i, v
     real(dp), dimension(n_vars, 3) :: error_norms
-    ! procedure(spatial_function), pointer :: eval_fun => null()
-    type(cts_t) :: eval_fun
-    ! real(dp), dimension(3,8) :: nodes
-    ! real(dp), dimension(n_dim)   :: h_ref
-
-    ! eval_fun => test_function_2
-
-    eval_fun = cts_t(n_dim,n_vars,rand_coefs=.true.)
     call grid%setup(1)
     call grid%gblock(1)%setup(n_dim,n_nodes,n_ghost)
     ! grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
     grid%gblock(1)%node_coords = unit_cartesian_mesh_cat_perturbed(n_nodes(1),n_nodes(2),n_nodes(3),0.3_dp)
     call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
     block_num = 1
-
-    ! nodes = pack_cell_node_coords( [1,1,1], [1,1,1], grid%gblock(block_num)%n_nodes, grid%gblock(block_num)%node_coords )
-    ! h_ref = maximal_extents( n_dim, 8, nodes(1:n_dim,:) )
     rec = var_rec_block_t( grid, block_num, n_dim, degree, n_vars )
 
-    ! term_start = 1
-    ! term_end   = rec%p%n_terms
-    ! call rec%set_cell_avgs(grid%gblock(1),n_vars,[(n,n=1,n_vars)],eval_fun)
-    ! call rec%init_cells(grid,term_start,term_end,n_vars,[(n,n=1,n_vars)])
-    ! call rec%solve(term_start,term_end,n_vars,[(n,n=1,n_vars)],omega=1.3_dp,tol=1e-10_dp,n_iter=100,converged=converged)
-
-    call rec%set_cell_avgs(grid%gblock(1),n_vars,[(n,n=1,n_vars)],eval_fun)
+    call rec%set_cell_avgs(grid%gblock(1),n_vars,[(n,n=1,n_vars)],eval_fun=eval_fun)
     do i = 1,rec%p%total_degree
       term_start = 1
       term_end   = nchoosek( rec%p%n_dim + i, i )
@@ -5052,32 +5036,93 @@ contains
     end do
   end subroutine setup_grid_and_rec
 
+  subroutine setup_grid_and_rec_2( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec, eval_fun )
+    use grid_derived_type,    only : grid_type
+    use var_rec_derived_type, only : var_rec_t
+    use linspace_helper,      only : unit_cartesian_mesh_cat
+    use linspace_helper,      only : unit_cartesian_mesh_cat_perturbed
+    use function_holder_type, only : func_h_t
+    integer,                   intent(in)  :: n_dim, n_vars, degree
+    integer, dimension(3),     intent(in)  :: n_nodes, n_ghost
+    type(grid_type),           intent(out) :: grid
+    type(var_rec_t),           intent(out) :: rec
+    class(func_h_t), optional, intent(in)  :: eval_fun
+
+    call grid%setup(1)
+    call grid%gblock(1)%setup(n_dim,n_nodes,n_ghost)
+
+    ! grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
+    grid%gblock(1)%node_coords = unit_cartesian_mesh_cat_perturbed(n_nodes(1),n_nodes(2),n_nodes(3),0.3_dp)
+
+    call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
+
+    rec = var_rec_t( grid, n_dim, degree, n_vars, ext_fun=eval_fun )
+    
+  end subroutine setup_grid_and_rec_2
+
 end module test_problem
 
 program main
   use set_precision, only : dp
   use set_constants, only : zero, one
-  use test_problem,  only : setup_grid_and_rec
+  use test_problem,  only : setup_grid_and_rec, setup_grid_and_rec_2
   use grid_derived_type, only : grid_type
   use var_rec_block_derived_type, only : var_rec_block_t
+  use var_rec_derived_type, only : var_rec_t
   use timer_derived_type, only : basic_timer_t
+  use function_holder_type, only : func_h_t
+  use cross_term_sinusoid,  only : cts_t
+  use reconstruction_output, only : output_block_reconstruction
 
   implicit none
 
   type(grid_type) :: grid
-  type(var_rec_block_t) :: rec
+  type(var_rec_block_t) :: rec1
+  type(var_rec_t) :: rec2
+  class(func_h_t), allocatable :: eval_fun
   type(basic_timer_t) :: timer
   integer :: degree, n_vars, n_dim
-  integer, dimension(3) :: n_nodes, n_ghost
+  integer, dimension(3) :: n_nodes, n_ghost, n_skip
+  logical :: old
+  real(dp), dimension(:,:), allocatable :: space_scale
 
-  degree  = 5
+  degree  = 3
   n_vars  = 1
-  n_dim   = 1
-  n_nodes = [5,5,5]
+  n_dim   = 2
+  n_nodes = [25,25,5]
   n_ghost = [0,0,0]
+  n_skip  = [1,1,1]
+  old = .false.
+
+  allocate( space_scale(n_dim,n_vars) )
+  space_scale = 0.1_dp
+  ! allocate( eval_fun, source=cts_t(n_dim,n_vars,rand_coefs=.true.) )
+  allocate( eval_fun, source=cts_t(n_dim,n_vars,rand_coefs=.true.,space_scale=space_scale) )
+
   call timer%tic()
-  call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec )
+  call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec1, eval_fun=eval_fun )
   write(*,*) 'Elapsed time: ', timer%toc()
-  call rec%destroy()
+
+  call output_block_reconstruction( grid%gblock(1), rec1, 1, 'test', old, &
+                                   quad_order=4,                      &
+                                   ext_fun=eval_fun,                  &
+                                   rec_out=.true.,                    &
+                                   ext_out=.true.,                    &
+                                   err_out=.true. )
+  call rec1%destroy()
+
+  ! write(*,*) '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
+  ! write(*,*) '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
+
+  ! call timer%tic()
+  ! call setup_grid_and_rec_2( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec2, eval_fun=eval_fun )
+  ! call rec2%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp)
+  ! write(*,*) 'Elapsed time: ', timer%toc()
+  ! call rec2%destroy()
+  
+  
   call grid%destroy()
+  call eval_fun%destroy()
+  if ( allocated(eval_fun) ) deallocate(eval_fun)
+  deallocate( space_scale )
 end program main
