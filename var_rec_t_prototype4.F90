@@ -4382,7 +4382,9 @@ contains
     residual = sqrt( residual )
   end subroutine SOR_iteration
 
-  subroutine perform_iterative_reconstruction_SOR(this,term_start,term_end,n_var,var_idx,omega,tol,n_iter,converged,residual)
+  subroutine perform_iterative_reconstruction_SOR( this, term_start, term_end, &
+                                                   n_var, var_idx, omega, tol, &
+                                                   n_iter, converged, residual )
     use set_constants, only : zero, one
     class(var_rec_block_t),       intent(inout) :: this
     integer,                            intent(in)    :: term_start, term_end, n_var
@@ -4608,141 +4610,6 @@ contains
 
 end module var_rec_block_derived_type
 
-module var_rec_derived_type
-  use set_precision,              only : dp
-  use var_rec_block_derived_type, only : var_rec_block_t
-  use function_holder_type,       only : func_h_t
-  implicit none
-  private
-  public :: var_rec_t
-
-  type :: var_rec_t
-    private
-    integer,                                          public :: n_blocks, n_dim, n_vars, degree
-    type(var_rec_block_t), dimension(:), allocatable, public :: b
-  contains
-    private
-    procedure, public, pass :: destroy => destroy_var_rec_t
-    procedure, public, pass :: solve   => iterative_solve
-    procedure, public, pass :: eval    => evaluate_reconstruction
-  end type var_rec_t
-
-  interface var_rec_t
-    module procedure constructor
-  end interface var_rec_t
-contains
-  pure elemental subroutine destroy_var_rec_t( this )
-    class(var_rec_t), intent(inout) :: this
-    if ( allocated(this%b) ) then
-      call this%b%destroy()
-      deallocate( this%b )
-    end if
-    this%n_blocks = 0
-    this%n_dim    = 0
-    this%n_vars   = 0
-    this%degree   = 0
-  end subroutine destroy_var_rec_t
-
-  function constructor( grid, n_dim, degree, n_vars, ext_fun ) result(this)
-    use grid_derived_type, only : grid_type
-    use var_rec_block_derived_type, only : var_rec_block_t
-    use function_holder_type,       only : func_h_t
-    type(grid_type),                 intent(in) :: grid
-    integer,                         intent(in) :: n_dim, degree, n_vars
-    ! integer, dimension(:), optional, intent(in) :: n_skip
-    class(func_h_t), optional,       intent(in) :: ext_fun
-    type(var_rec_t) :: this
-    ! integer, dimension(n_dim) :: n_skip_
-    integer :: i, n
-    call this%destroy()
-
-    ! n_skip_ = 1
-    ! if ( present(n_skip) ) n_skip_ = n_skip
-
-    this%n_dim    = n_dim
-    this%n_vars   = n_vars
-    this%degree   = degree
-    this%n_blocks = grid%n_blocks
-
-    allocate( this%b(this%n_blocks) )
-    do i = 1,this%n_blocks
-      this%b(i) = var_rec_block_t( grid, i, n_dim, degree, n_vars )
-    end do
-
-    if ( present(ext_fun) ) then
-      do i = 1,this%n_blocks
-        call this%b(i)%set_cell_avgs(grid%gblock(i),n_vars,[(n,n=1,n_vars)],ext_fun)
-      end do
-    end if
-  end function constructor
-
-  pure function evaluate_reconstruction( this, blk, cell_idx, x, vars, n_terms ) result(val)
-    use index_conversion, only : local2global
-    class(var_rec_t), intent(in) :: this
-    integer,                intent(in) :: blk
-    integer, dimension(:),  intent(in) :: cell_idx
-    real(dp), dimension(:), intent(in) :: x
-    integer, dimension(:),  intent(in) :: vars
-    integer, optional,      intent(in) :: n_terms
-    real(dp), dimension(size(vars))    :: val
-    integer :: n_vars
-
-    n_vars = size(vars)
-    if ( present(n_terms) ) then
-      val = this%b(blk)%eval(cell_idx, x, vars, n_terms=n_terms )
-    else
-      val = this%b(blk)%eval(cell_idx, x, vars )
-    end if
-  end function evaluate_reconstruction
-
-  subroutine iterative_solve(this,grid,ext_fun,final_degree,ramp,omega,tol,n_iter)
-    use combinatorics, only : nchoosek
-    use grid_derived_type, only : grid_type
-    use function_holder_type, only : func_h_t
-    class(var_rec_t), intent(inout) :: this
-    type(grid_type),  intent(in)    :: grid
-    class(func_h_t), optional, intent(in) :: ext_fun
-    integer,         optional, intent(in) :: final_degree
-    logical,         optional, intent(in) :: ramp
-    real(dp),        optional, intent(in) :: omega, tol
-    integer,         optional, intent(in) :: n_iter
-    real(dp), dimension(this%n_vars, 3) :: error_norms
-    integer :: i, blk, n, v
-    integer :: term_start, term_end, degree_start, degree_end, n_vars
-    logical :: converged
-
-    degree_start = this%degree
-    degree_end   = this%degree
-    n_vars = this%n_vars
-    
-    if ( present( final_degree ) ) degree_end = final_degree
-    if ( present( ramp) ) then
-      if ( ramp ) degree_start = 1
-    end if
-
-    do i = degree_start, degree_end
-      term_start = 1
-      term_end   = nchoosek( this%n_dim + i, i )
-      write(*,'(A,I0)') "reconstructing: p=",i 
-      do blk = 1, this%n_blocks
-        call this%b(blk)%init_cells(grid,term_start,term_end,n_vars,[(n,n=1,n_vars)])
-        call this%b(blk)%solve(term_start,term_end,n_vars,[(n,n=1,n_vars)],omega=omega,tol=tol,n_iter=n_iter,converged=converged)
-        write(*,*)
-        write(*,'(A,I0,A,L1)') 'Block ', blk, ': converged =', converged
-        if ( present(ext_fun) ) then
-          error_norms = this%b(blk)%get_error_norm(grid%gblock(blk),[(n,n=1,n_vars)],term_end,[1,2,huge(1)],ext_fun)
-          write(*,'(A,I0,A)') 'Block ', blk, ' error norms: '
-          do v = 1,n_vars
-            write(*,'(I0,3(" ",ES18.12))') v, (error_norms(v,n), n = 1,3)
-          end do
-        end if
-      end do
-    end do
-  end subroutine iterative_solve
-
-end module var_rec_derived_type
-
-
 
 module reconstruction_output
   use set_precision, only : dp
@@ -4753,7 +4620,10 @@ module reconstruction_output
   public :: output_cell_reconstruction
   public :: output_block_reconstruction
 contains
-  subroutine output_block_reconstruction( gblock1, rec, blk, base_name, old, n_skip, quad_order, ext_fun, rec_out, ext_out, err_out, n_terms, tag )
+  subroutine output_block_reconstruction( gblock1, rec, blk, base_name, old, &
+                                          n_skip, quad_order,                &
+                                          ext_fun, rec_out, ext_out, err_out,&
+                                          n_terms, tag, solution_time, strand_id )
     use set_constants, only : max_text_line_length
     use index_conversion, only : global2local
     use var_rec_block_derived_type, only : var_rec_block_t
@@ -4770,6 +4640,8 @@ contains
     logical,               optional, intent(in)    :: rec_out, ext_out, err_out
     integer,               optional, intent(in)    :: n_terms
     character(*),          optional, intent(in)    :: tag
+    integer,               optional, intent(in)    :: strand_id
+    real(dp),              optional, intent(in)    :: solution_time
     character(max_text_line_length) :: file_name
     integer :: i
     file_name = trim(base_name)//'-reconstructed'
@@ -4789,10 +4661,16 @@ contains
                                        rec_out=rec_out,             &
                                        ext_out=ext_out,             &
                                        err_out=err_out,             &
-                                       n_terms=n_terms )
+                                       n_terms=n_terms,             &
+                                       strand_id=strand_id,         &
+                                       solution_time=solution_time )
     end do
   end subroutine output_block_reconstruction
-  subroutine output_cell_reconstruction( gblock1, rec, blk, cell_idx, file_name, old, n_skip, quad_order, ext_fun, rec_out, ext_out, err_out, n_terms )
+
+  subroutine output_cell_reconstruction( gblock1, rec, blk, cell_idx,          &
+                                         file_name, old, n_skip, quad_order,   &
+                                         ext_fun, rec_out, ext_out, err_out,   &
+                                         n_terms, strand_id, solution_time )
     use index_conversion, only : local2global
     use quadrature_derived_type, only : num_quad_pts, quad_t
     use tecplot_output, only : write_tecplot_ordered_zone_header
@@ -4811,6 +4689,8 @@ contains
     class(func_h_t),       optional, intent(in)    :: ext_fun
     logical,               optional, intent(in)    :: rec_out, ext_out, err_out
     integer,               optional, intent(in)    :: n_terms
+    integer,               optional, intent(in)    :: strand_id
+    real(dp),              optional, intent(in)    :: solution_time
     integer :: quad_order_, lin_idx
     integer,  dimension(rec%n_dim) :: n_nodes
     integer, dimension(3) :: n_skip_
@@ -4912,7 +4792,9 @@ contains
                                            n_node_vars, n_cell_vars, &
                                            zone_name=zone_name,      &
                                            var_names=var_names,      &
-                                           data_packing='block' )
+                                           data_packing='block',     &
+                                           solution_time=solution_time, &
+                                           strand_id=strand_id )
     call write_tecplot_ordered_zone_block_packed(fid, n_nodes, n_node_vars, n_cell_vars, NODE_DATA, CELL_DATA )
     close(fid)
     deallocate( var_names, tmp_var, NODE_DATA )
@@ -4963,6 +4845,179 @@ contains
     end associate
   end subroutine get_cell_quad
 end module reconstruction_output
+
+
+
+
+module var_rec_derived_type
+  use set_precision,              only : dp
+  use var_rec_block_derived_type, only : var_rec_block_t
+  use function_holder_type,       only : func_h_t
+  implicit none
+  private
+  public :: var_rec_t
+
+  type :: var_rec_t
+    private
+    integer,                                          public :: n_blocks, n_dim, n_vars, degree
+    type(var_rec_block_t), dimension(:), allocatable, public :: b
+  contains
+    private
+    procedure, public, pass :: destroy => destroy_var_rec_t
+    procedure, public, pass :: solve   => iterative_solve
+    procedure, public, pass :: eval    => evaluate_reconstruction
+  end type var_rec_t
+
+  interface var_rec_t
+    module procedure constructor
+  end interface var_rec_t
+contains
+  pure elemental subroutine destroy_var_rec_t( this )
+    class(var_rec_t), intent(inout) :: this
+    if ( allocated(this%b) ) then
+      call this%b%destroy()
+      deallocate( this%b )
+    end if
+    this%n_blocks = 0
+    this%n_dim    = 0
+    this%n_vars   = 0
+    this%degree   = 0
+  end subroutine destroy_var_rec_t
+
+  function constructor( grid, n_dim, degree, n_vars, ext_fun ) result(this)
+    use grid_derived_type, only : grid_type
+    use var_rec_block_derived_type, only : var_rec_block_t
+    use function_holder_type,       only : func_h_t
+    type(grid_type),                 intent(in) :: grid
+    integer,                         intent(in) :: n_dim, degree, n_vars
+    ! integer, dimension(:), optional, intent(in) :: n_skip
+    class(func_h_t), optional,       intent(in) :: ext_fun
+    type(var_rec_t) :: this
+    ! integer, dimension(n_dim) :: n_skip_
+    integer :: i, n
+    call this%destroy()
+
+    ! n_skip_ = 1
+    ! if ( present(n_skip) ) n_skip_ = n_skip
+
+    this%n_dim    = n_dim
+    this%n_vars   = n_vars
+    this%degree   = degree
+    this%n_blocks = grid%n_blocks
+
+    allocate( this%b(this%n_blocks) )
+    do i = 1,this%n_blocks
+      this%b(i) = var_rec_block_t( grid, i, n_dim, degree, n_vars )
+    end do
+
+    if ( present(ext_fun) ) then
+      do i = 1,this%n_blocks
+        call this%b(i)%set_cell_avgs(grid%gblock(i),n_vars,[(n,n=1,n_vars)],ext_fun)
+      end do
+    end if
+  end function constructor
+
+  pure function evaluate_reconstruction( this, blk, cell_idx, x, vars, n_terms ) result(val)
+    use index_conversion, only : local2global
+    class(var_rec_t), intent(in) :: this
+    integer,                intent(in) :: blk
+    integer, dimension(:),  intent(in) :: cell_idx
+    real(dp), dimension(:), intent(in) :: x
+    integer, dimension(:),  intent(in) :: vars
+    integer, optional,      intent(in) :: n_terms
+    real(dp), dimension(size(vars))    :: val
+    integer :: n_vars
+
+    n_vars = size(vars)
+    if ( present(n_terms) ) then
+      val = this%b(blk)%eval(cell_idx, x, vars, n_terms=n_terms )
+    else
+      val = this%b(blk)%eval(cell_idx, x, vars )
+    end if
+  end function evaluate_reconstruction
+
+  subroutine iterative_solve( this, grid, ext_fun, final_degree, ramp, omega,  &
+                              tol, n_iter, soln_name, output_quad_order )
+    use set_constants, only : zero
+    use combinatorics, only : nchoosek
+    use grid_derived_type, only : grid_type
+    use function_holder_type, only : func_h_t
+    use reconstruction_output, only : output_block_reconstruction
+    class(var_rec_t), intent(inout) :: this
+    type(grid_type),  intent(in)    :: grid
+    class(func_h_t), optional, intent(in) :: ext_fun
+    integer,         optional, intent(in) :: final_degree
+    logical,         optional, intent(in) :: ramp
+    real(dp),        optional, intent(in) :: omega, tol
+    integer,         optional, intent(in) :: n_iter
+    character(*),    optional, intent(in) :: soln_name
+    integer,         optional, intent(in) :: output_quad_order
+    real(dp), dimension(this%n_vars, 3) :: error_norms
+    integer :: i, blk, n, v
+    integer :: term_start, term_end, degree_start, degree_end, n_vars
+    integer :: quad_order
+    logical :: converged, old
+
+    old = .false.
+
+    quad_order = 1
+    if (present(output_quad_order)) quad_order = output_quad_order
+
+    degree_start = this%degree
+    degree_end   = this%degree
+    n_vars = this%n_vars
+    
+    if ( present( final_degree ) ) degree_end = final_degree
+    if ( present( ramp) ) then
+      if ( ramp ) degree_start = 1
+    end if
+
+    if (present(soln_name)) then
+      do blk = 1, this%n_blocks
+        call output_block_reconstruction( grid%gblock(blk), this%b(blk), blk,  &
+                                          soln_name, old,                      &
+                                          quad_order=quad_order,               &
+                                          ext_fun=ext_fun,                     &
+                                          rec_out=.true.,                      &
+                                          ext_out=.true.,                      &
+                                          err_out=.true.,                      &
+                                          solution_time=zero )
+      end do
+    end if
+
+
+    do i = degree_start, degree_end
+      term_start = 1
+      term_end   = nchoosek( this%n_dim + i, i )
+      write(*,'(A,I0)') "reconstructing: p=",i 
+      do blk = 1, this%n_blocks
+        call this%b(blk)%init_cells(grid,term_start,term_end,n_vars,[(n,n=1,n_vars)])
+        call this%b(blk)%solve(term_start,term_end,n_vars,[(n,n=1,n_vars)],omega=omega,tol=tol,n_iter=n_iter,converged=converged)
+        write(*,*)
+        write(*,'(A,I0,A,L1)') 'Block ', blk, ': converged =', converged
+        if ( present(ext_fun) ) then
+          error_norms = this%b(blk)%get_error_norm(grid%gblock(blk),[(n,n=1,n_vars)],term_end,[1,2,huge(1)],ext_fun)
+          write(*,'(A,I0,A)') 'Block ', blk, ' error norms: '
+          do v = 1,n_vars
+            write(*,'(I0,3(" ",ES18.12))') v, (error_norms(v,n), n = 1,3)
+          end do
+        end if
+        if (present(soln_name)) then
+          call output_block_reconstruction( grid%gblock(blk), this%b(blk),   &
+                                            blk, soln_name, old,             &
+                                            quad_order=quad_order,           &
+                                            ext_fun=ext_fun,                 &
+                                            rec_out=.true.,                  &
+                                            ext_out=.true.,                  &
+                                            err_out=.true.,                  &
+                                            solution_time=real(i,dp) )
+        end if
+
+      end do
+    end do
+  end subroutine iterative_solve
+
+end module var_rec_derived_type
 
 module test_problem
   use set_precision, only : dp
@@ -5084,41 +5139,29 @@ program main
   integer :: degree, n_vars, n_dim
   integer, dimension(3) :: n_nodes, n_ghost, n_skip
   logical :: old
-  real(dp), dimension(:,:), allocatable :: space_scale
+  real(dp), dimension(:,:), allocatable :: space_scale, space_origin
+  integer :: i
 
-  degree  = 3
-  n_vars  = 1
-  n_dim   = 2
-  n_nodes = [25,25,5]
+  degree  = 4
+  n_vars  = 5
+  n_dim   = 3
+  n_nodes = [5,5,5]
   n_ghost = [0,0,0]
   n_skip  = [1,1,1]
   old = .false.
 
   allocate( space_scale(n_dim,n_vars) )
-  space_scale = 0.1_dp
-  ! allocate( eval_fun, source=cts_t(n_dim,n_vars,rand_coefs=.true.) )
-  allocate( eval_fun, source=cts_t(n_dim,n_vars,rand_coefs=.true.,space_scale=space_scale) )
+  allocate( space_origin(n_dim,n_vars) )
+  space_scale = 1.0_dp
+  space_origin = 0.5_dp
+  allocate( eval_fun, source=cts_t(n_dim,n_vars,rand_coefs=.true.,space_scale=space_scale, space_origin=space_origin) )
 
   call timer%tic()
-  call setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec1, eval_fun=eval_fun )
-  write(*,*) 'Elapsed time: ', timer%toc()
-
-  call output_block_reconstruction( grid%gblock(1), rec1, 1, 'test', old, &
-                                   quad_order=4,                      &
-                                   ext_fun=eval_fun,                  &
-                                   rec_out=.true.,                    &
-                                   ext_out=.true.,                    &
-                                   err_out=.true. )
-  call rec1%destroy()
-
-  ! write(*,*) '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
-  ! write(*,*) '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
-
-  ! call timer%tic()
-  ! call setup_grid_and_rec_2( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec2, eval_fun=eval_fun )
+  call setup_grid_and_rec_2( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec2, eval_fun=eval_fun )
+  call rec2%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=100,soln_name='test',output_quad_order=12)
   ! call rec2%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp)
-  ! write(*,*) 'Elapsed time: ', timer%toc()
-  ! call rec2%destroy()
+  write(*,*) 'Elapsed time: ', timer%toc()
+  call rec2%destroy()
   
   
   call grid%destroy()
