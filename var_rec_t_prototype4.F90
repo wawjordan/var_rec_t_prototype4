@@ -1499,10 +1499,20 @@ end module pointers
 
 module linspace_helper
   use set_precision, only : dp
+  implicit none
   private
   public :: unit_cartesian_mesh_cat
   public :: unit_cartesian_mesh_cat_perturbed
   public :: linspace, meshgrid2, meshgrid3
+  public :: map_1D_fun, cartesian_mesh, perturb_mesh
+
+  interface
+    pure function map_1D_fun(x_in) result(x_out)
+      use set_precision, only : dp
+      real(dp), dimension(:), intent(in) :: x_in
+      real(dp), dimension(size(x_in)) :: x_out
+    end function map_1D_fun
+  end interface
 contains
   pure function unit_cartesian_mesh_cat(nx,ny,nz) result(xyz)
     integer, intent(in) :: nx, ny, nz
@@ -1522,6 +1532,92 @@ contains
       end do
     end do
   end function unit_cartesian_mesh_cat
+
+  pure function cartesian_mesh(nx,ny,nz,end_pts,x_fun,y_fun,z_fun) result(xyz)
+    use set_constants, only : zero, one
+    integer, intent(in) :: nx, ny, nz
+    real(dp), dimension(3,2), optional, intent(in) :: end_pts
+    procedure(map_1D_fun), optional :: x_fun, y_fun, z_fun
+    real(dp), dimension(3,nx,ny,nz) :: xyz
+    real(dp), dimension(nx) :: x_vec1, x_vec2
+    real(dp), dimension(ny) :: y_vec1, y_vec2
+    real(dp), dimension(nz) :: z_vec1, z_vec2
+
+    if ( present(end_pts) ) then
+      x_vec1 = linspace(nx,end_pts(1,1),end_pts(1,2))
+      y_vec1 = linspace(ny,end_pts(2,1),end_pts(2,2))
+      z_vec1 = linspace(nz,end_pts(3,1),end_pts(3,2))
+    else
+      x_vec1 = linspace(nx,zero,one)
+      y_vec1 = linspace(ny,zero,one)
+      z_vec1 = linspace(nz,zero,one)
+    end if
+
+    if ( present(x_fun) ) then
+      x_vec2 = x_vec1
+      x_vec1 = x_fun(x_vec2)
+    end if
+
+    if ( present(y_fun) ) then
+      y_vec2 = y_vec1
+      y_vec1 = y_fun(y_vec2)
+    end if
+
+    if ( present(z_fun) ) then
+      z_vec2 = z_vec1
+      z_vec1 = z_fun(z_vec2)
+    end if
+
+    xyz = cartesian_mesh_coords(x_vec1,y_vec1,z_vec1)
+  end function cartesian_mesh
+
+  pure function cartesian_mesh_coords(x_vec,y_vec,z_vec) result(xyz)
+    real(dp), dimension(:), intent(in) :: x_vec, y_vec, z_vec
+    real(dp), dimension(3,size(x_vec),size(y_vec),size(z_vec)) :: xyz
+    call meshgrid3( x_vec, y_vec, z_vec, xyz(1,:,:,:),xyz(2,:,:,:),xyz(3,:,:,:) )
+  end function cartesian_mesh_coords
+
+  subroutine perturb_mesh(xyz,delta)
+    use index_conversion, only : in_bound
+    use set_constants, only : zero, one, two, large
+    real(dp), dimension(:,:,:,:), intent(inout) :: xyz
+    real(dp),                     intent(in)    :: delta
+    integer, dimension(4) :: sz_tmp
+    integer, dimension(3) :: n_nodes, o
+    real(dp), dimension(3) :: mult
+    real(dp), allocatable, dimension(:,:,:,:) :: xyz_tmp
+    real(dp) :: diff, h0
+    integer :: i, j, k, d, s
+    sz_tmp = shape(xyz)
+    n_nodes = sz_tmp(2:4)
+
+    mult = zero
+    where ( n_nodes > 2 ) mult = delta
+
+    allocate( xyz_tmp(3,0:n_nodes(1)+1,0:n_nodes(2)+1,0:n_nodes(3)+1) )
+    xyz_tmp = large
+    xyz_tmp(:,1:n_nodes(1),1:n_nodes(2),1:n_nodes(3)) = xyz
+
+    do k = 1,n_nodes(3)
+      do j = 1,n_nodes(2)
+        do i = 1,n_nodes(1)
+          do d = 1,3
+            o = 0
+            h0 = large
+            do s = -1,1,2
+              o(d) = s
+              h0 = min( h0, abs( xyz_tmp(d,i,j,k) - xyz_tmp(d,i+o(1),j+o(2),k+o(3)) ) )
+            end do
+            call random_number(diff); diff = two*diff - one
+            xyz(d,i,j,k) = xyz(d,i,j,k) + mult(d)*diff*h0
+          end do
+        end do
+      end do
+    end do
+
+    deallocate( xyz_tmp )
+
+  end subroutine perturb_mesh
 
   function unit_cartesian_mesh_cat_perturbed(nx,ny,nz,delta) result(xyz)
     use set_constants, only : zero, one, two
@@ -3615,6 +3711,89 @@ contains
 
 end module function_holder_type
 
+module test_function_1
+  use function_holder_type, only : func_h_t
+  implicit none
+  private
+  public :: test_fun1_t
+
+  type, extends(func_h_t) :: test_fun1_t
+  contains
+    procedure :: eval    => eval_test_fun1
+    procedure :: destroy => destroy_test_fun1
+  end type test_fun1_t
+
+  interface test_fun1_t
+    procedure constructor
+  end interface test_fun1_t
+contains
+  function constructor(n_dim,n_eq) result(this)
+    integer, intent(in) :: n_dim, n_eq
+    type(test_fun1_t)   :: this
+    call this%destroy()
+    call this%initialize_super(n_eq,n_dim)
+  end function constructor
+
+  pure elemental subroutine destroy_test_fun1(this)
+    class(test_fun1_t), intent(inout) :: this
+    continue
+  end subroutine destroy_test_fun1
+
+  pure function eval_test_fun1( this, x, t ) result(q)
+    use set_precision, only : dp
+    class(test_fun1_t),        intent(in) :: this
+    real(dp), dimension(:), intent(in) :: x
+    real(dp), optional,     intent(in) :: t
+    real(dp), dimension(this%n_eq)     :: q
+    q = 999.0_dp * x(1) - 888.0_dp * x(2) + 777.0_dp * x(3) - 666.0_dp
+  end function eval_test_fun1
+
+end module test_function_1
+
+module test_function_2
+  use function_holder_type, only : func_h_t
+  implicit none
+  private
+  public :: test_fun2_t
+
+  type, extends(func_h_t) :: test_fun2_t
+  contains
+    procedure :: eval    => eval_test_fun2
+    procedure :: destroy => destroy_test_fun2
+  end type test_fun2_t
+
+  interface test_fun2_t
+    procedure constructor
+  end interface test_fun2_t
+contains
+  function constructor(n_dim,n_eq) result(this)
+    integer, intent(in) :: n_dim, n_eq
+    type(test_fun2_t)   :: this
+    call this%destroy()
+    call this%initialize_super(n_eq,n_dim)
+  end function constructor
+
+  pure elemental subroutine destroy_test_fun2(this)
+    class(test_fun2_t), intent(inout) :: this
+    continue
+  end subroutine destroy_test_fun2
+
+  pure function eval_test_fun2( this, x, t ) result(q)
+    use set_precision, only : dp
+    use set_constants, only : pi
+    class(test_fun2_t),        intent(in) :: this
+    real(dp), dimension(:), intent(in) :: x
+    real(dp), optional,     intent(in) :: t
+    real(dp), dimension(this%n_eq)     :: q
+    integer :: i
+    q = sin(pi*x(1))
+    do i = 2,this%n_dim
+      q = q*sin(pi*x(i))
+    end do
+  end function eval_test_fun2
+
+end module test_function_2
+
 module cross_term_sinusoid
   use set_precision, only : dp
   use function_holder_type, only : func_h_t
@@ -3654,8 +3833,7 @@ contains
     integer :: total_degree, n_terms
 
     call this%destroy()
-    this%n_dim = n_dim
-    this%n_eq  = n_eq
+    call this%initialize_super(n_eq,n_dim)
     total_degree = n_dim
     this%mono = monomial_basis_t(total_degree,n_dim)
     n_terms = this%mono%n_terms
@@ -5023,73 +5201,92 @@ module test_problem
   use set_precision, only : dp
   implicit none
   private
-  public :: setup_grid_and_rec, setup_grid_and_rec_2
-  public :: test_function_1, test_function_2
+  ! public :: setup_grid_and_rec_2
+  public :: setup_grid, setup_reconstruction
+  public :: geom_space_wrapper
+  interface setup_grid
+    module procedure setup_grid_generate
+    ! module procedure setup_grid_read
+  end interface setup_grid
 contains
 
-  pure function test_function_1(n_dim,n_var,x) result(val)
-    integer,                intent(in) :: n_dim, n_var
-    real(dp), dimension(:), intent(in) :: x
-    real(dp), dimension(n_var)         :: val
-    val(1) = 999.0_dp * x(1) - 888.0_dp * x(2) + 777.0_dp * x(3) - 666.0_dp
-    val(:) = val(1)
-  end function test_function_1
+  pure function geom_space_wrapper(x_in) result(x_out)
+    real(dp), dimension(:), intent(in) :: x_in
+    real(dp), dimension(size(x_in))    :: x_out
+    x_out = geom_space(x_in,1.1_dp)
+  end function geom_space_wrapper
 
-  pure function test_function_2(n_dim,n_var,x) result(val)
-  use set_constants, only : pi
-    integer,                intent(in) :: n_dim, n_var
-    real(dp), dimension(:), intent(in) :: x
-    real(dp), dimension(n_var)         :: val
-    integer :: i
-    val(1) = sin(pi*x(1))
-    do i = 2,n_dim
-      val(1) = val(1)*sin(pi*x(i))
+  pure function geom_space(x_in,r) result(x_out)
+    use set_constants, only : zero, one
+    real(dp), dimension(:), intent(in) :: x_in
+    real(dp),               intent(in) :: r
+    real(dp), dimension(size(x_in))    :: x_out
+    real(dp) :: dx0, dx
+    integer :: i, j, N
+    N = size(x_in)
+    x_out = zero
+    x_out(1) = x_in(1)
+    x_out(N) = x_in(N)
+    dx0 = one
+    do i = 1,N-2
+      dx0 = dx0 + r**i
     end do
-    val(:) = val(1)
-    ! val(1) = sin(pi*x(1)) * sin(pi*x(2)) * sin(pi*x(3))
-    ! val(1) = sin(pi*x(1)) * sin(pi*x(2))
-  end function test_function_2
+    dx0 = ( x_in(N) - x_in(1) ) / dx0
+    do i = 2,N-1
+      dx = dx0
+      do j = 1,i-2
+        dx = dx * r
+      end do
+      x_out(i) = x_out(i-1) + dx
+    end do
+  end function geom_space
 
-  subroutine setup_grid_and_rec( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec, eval_fun )
-    use combinatorics, only : nchoosek
-    use grid_derived_type,           only : grid_type
-    use var_rec_block_derived_type,  only : var_rec_block_t
-    use monomial_basis_derived_type, only : monomial_basis_t
-    use linspace_helper,             only : unit_cartesian_mesh_cat
-    use linspace_helper,             only : unit_cartesian_mesh_cat_perturbed
-    use function_holder_type,        only : func_h_t
-    integer,                     intent(in)  :: n_dim, n_vars, degree
-    integer, dimension(3),       intent(in)  :: n_nodes, n_ghost
-    type(grid_type),             intent(out) :: grid
-    type(var_rec_block_t),       intent(out) :: rec
-    class(func_h_t), optional, intent(in)  :: eval_fun
-    logical :: converged
-    integer :: block_num, term_start, term_end
-    integer :: n, i, v
-    real(dp), dimension(n_vars, 3) :: error_norms
+  subroutine setup_grid_generate( n_dim, n_nodes, n_ghost, grid, delta, end_pts, x1_map, x2_map, x3_map )
+    use grid_derived_type,    only : grid_type
+    use linspace_helper,      only : cartesian_mesh, perturb_mesh, map_1D_fun
+    integer, intent(in) :: n_dim
+    integer, dimension(3), intent(in) :: n_nodes, n_ghost
+    type(grid_type),       intent(out) :: grid
+    real(dp), optional,    intent(in)  :: delta
+    real(dp), dimension(3,2), optional, intent(in) :: end_pts
+    procedure(map_1D_fun), optional    :: x1_map, x2_map, x3_map
+    ! integer, dimension(3), optional, intent(in) :: n_blocks
+    ! integer :: n_total_blocks
+    ! n_total_blocks = 1
+    ! if (present(n_blocks) ) then
+    !   n_total_blocks = product(n_blocks)
+    ! end if
+
     call grid%setup(1)
     call grid%gblock(1)%setup(n_dim,n_nodes,n_ghost)
-    ! grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
-    grid%gblock(1)%node_coords = unit_cartesian_mesh_cat_perturbed(n_nodes(1),n_nodes(2),n_nodes(3),0.3_dp)
-    call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
-    block_num = 1
-    rec = var_rec_block_t( grid, block_num, n_dim, degree, n_vars )
 
-    call rec%set_cell_avgs(grid%gblock(1),n_vars,[(n,n=1,n_vars)],eval_fun=eval_fun)
-    do i = 1,rec%p%total_degree
-      term_start = 1
-      term_end   = nchoosek( rec%p%n_dim + i, i )
-      write(*,'(A,I0)') "reconstructing: p=",i 
-      call rec%init_cells(grid,term_start,term_end,n_vars,[(n,n=1,n_vars)])
-      call rec%solve(term_start,term_end,n_vars,[(n,n=1,n_vars)],omega=1.3_dp,tol=1e-10_dp,n_iter=100,converged=converged)
-      write(*,*) 'converged =', converged
-      error_norms = rec%get_error_norm(grid%gblock(1),[(n,n=1,n_vars)],term_end,[1,2,huge(1)],eval_fun)
-      write(*,*) 'Error: '
-      do v = 1,n_vars
-        write(*,'(I0,3(" ",ES18.12))') v, (error_norms(v,n), n = 1,3)
-      end do
-    end do
-  end subroutine setup_grid_and_rec
+    grid%gblock(1)%node_coords = cartesian_mesh( n_nodes(1),n_nodes(2),n_nodes(3), end_pts=end_pts,x_fun=x1_map,y_fun=x2_map,z_fun=x3_map)
+    if (present(delta) ) then
+      call perturb_mesh( grid%gblock(1)%node_coords, delta )
+    end if
+    call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
+  end subroutine setup_grid_generate
+
+  ! subroutine setup_grid_read( file_name, n_ghost, grid )
+  !   use grid_derived_type,    only : grid_type
+  !   character(*), intent(in) :: file_name
+  !   integer,      intent(in) :: n_ghost
+  !   type(grid_type), intent(out) :: grid
+
+  ! end subroutine setup_grid_read
+
+  subroutine setup_reconstruction( grid, n_dim, n_vars, degree, rec, eval_fun )
+    use grid_derived_type,    only : grid_type
+    use var_rec_derived_type, only : var_rec_t
+    use function_holder_type, only : func_h_t
+    type(grid_type),           intent(in) :: grid
+    integer,                   intent(in)  :: n_dim, n_vars, degree
+    type(var_rec_t),           intent(out) :: rec
+    class(func_h_t), optional, intent(in)  :: eval_fun
+    rec = var_rec_t( grid, n_dim, degree, n_vars, ext_fun=eval_fun )
+  end subroutine setup_reconstruction
+
+  
 
   subroutine setup_grid_and_rec_2( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec, eval_fun )
     use grid_derived_type,    only : grid_type
@@ -5120,20 +5317,18 @@ end module test_problem
 program main
   use set_precision, only : dp
   use set_constants, only : zero, one
-  use test_problem,  only : setup_grid_and_rec, setup_grid_and_rec_2
+  use test_problem,  only : setup_grid, setup_reconstruction, geom_space_wrapper
   use grid_derived_type, only : grid_type
   use var_rec_block_derived_type, only : var_rec_block_t
   use var_rec_derived_type, only : var_rec_t
   use timer_derived_type, only : basic_timer_t
   use function_holder_type, only : func_h_t
   use cross_term_sinusoid,  only : cts_t
-  use reconstruction_output, only : output_block_reconstruction
 
   implicit none
 
   type(grid_type) :: grid
-  type(var_rec_block_t) :: rec1
-  type(var_rec_t) :: rec2
+  type(var_rec_t) :: rec
   class(func_h_t), allocatable :: eval_fun
   type(basic_timer_t) :: timer
   integer :: degree, n_vars, n_dim
@@ -5144,8 +5339,8 @@ program main
 
   degree  = 4
   n_vars  = 5
-  n_dim   = 3
-  n_nodes = [5,5,5]
+  n_dim   = 2
+  n_nodes = [65,65,2]
   n_ghost = [0,0,0]
   n_skip  = [1,1,1]
   old = .false.
@@ -5157,15 +5352,18 @@ program main
   allocate( eval_fun, source=cts_t(n_dim,n_vars,rand_coefs=.true.,space_scale=space_scale, space_origin=space_origin) )
 
   call timer%tic()
-  call setup_grid_and_rec_2( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec2, eval_fun=eval_fun )
-  call rec2%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=100,soln_name='test',output_quad_order=12)
-  ! call rec2%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp)
+  ! call setup_grid_generate( n_dim, n_nodes, n_ghost, grid, delta=0.3_dp, x1_map, x2_map, x3_map )
+  call setup_grid( n_dim, n_nodes, n_ghost, grid, delta=0.0_dp, x2_map=geom_space_wrapper )
+  call setup_reconstruction( grid, n_dim, n_vars, degree, rec, eval_fun=eval_fun )
+  ! call setup_grid_and_rec_2( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec2, eval_fun=eval_fun )
+  call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=100,soln_name='test',output_quad_order=12)
+  ! call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp)
   write(*,*) 'Elapsed time: ', timer%toc()
-  call rec2%destroy()
+  call rec%destroy()
   
   
   call grid%destroy()
   call eval_fun%destroy()
   if ( allocated(eval_fun) ) deallocate(eval_fun)
-  deallocate( space_scale )
+  deallocate( space_scale, space_origin )
 end program main
