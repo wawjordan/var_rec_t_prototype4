@@ -1501,8 +1501,6 @@ module linspace_helper
   use set_precision, only : dp
   implicit none
   private
-  public :: unit_cartesian_mesh_cat
-  public :: unit_cartesian_mesh_cat_perturbed
   public :: linspace, meshgrid2, meshgrid3
   public :: map_1D_fun, cartesian_mesh, perturb_mesh
 
@@ -1514,24 +1512,6 @@ module linspace_helper
     end function map_1D_fun
   end interface
 contains
-  pure function unit_cartesian_mesh_cat(nx,ny,nz) result(xyz)
-    integer, intent(in) :: nx, ny, nz
-    real(dp), dimension(3,nx,ny,nz) :: xyz
-    real(dp), dimension(nx,ny,nz) :: tmp_x, tmp_y, tmp_z
-    integer :: i, j, k
-
-    call unit_cartesian_mesh(nx,ny,nz,tmp_x,tmp_y,tmp_z)
-
-    do k = 1,nz
-      do j = 1,ny
-        do i = 1,nx
-          xyz(1,i,j,k) = tmp_x(i,j,k)
-          xyz(2,i,j,k) = tmp_y(i,j,k)
-          xyz(3,i,j,k) = tmp_z(i,j,k)
-        end do
-      end do
-    end do
-  end function unit_cartesian_mesh_cat
 
   pure function cartesian_mesh(nx,ny,nz,end_pts,x_fun,y_fun,z_fun) result(xyz)
     use set_constants, only : zero, one
@@ -1618,48 +1598,6 @@ contains
     deallocate( xyz_tmp )
 
   end subroutine perturb_mesh
-
-  function unit_cartesian_mesh_cat_perturbed(nx,ny,nz,delta) result(xyz)
-    use set_constants, only : zero, one, two
-    integer, intent(in) :: nx, ny, nz
-    real(dp), intent(in) :: delta
-    real(dp), dimension(3,nx,ny,nz) :: xyz
-    real(dp), dimension(nx,ny,nz) :: tmp_x, tmp_y, tmp_z
-    integer :: i, j, k
-    real(dp), dimension(3) :: h0
-    real(dp) :: dx, dy, dz
-
-    call unit_cartesian_mesh(nx,ny,nz,tmp_x,tmp_y,tmp_z)
-    h0 = zero
-    if ( nx > 2 ) h0(1) = one/real(nx-1,dp)
-    if ( ny > 2 ) h0(2) = one/real(ny-1,dp)
-    if ( nz > 2 ) h0(3) = one/real(nz-1,dp)
-    h0 = h0 * delta
-
-    call random_init(.true.,.false.)
-    do k = 1,nz
-      do j = 1,ny
-        do i = 1,nx
-          call random_number(dx); dx = two*dx - one; dx = dx*h0(1)
-          call random_number(dy); dy = two*dy - one; dy = dy*h0(2)
-          call random_number(dz); dz = two*dz - one; dz = dz*h0(3)
-          xyz(1,i,j,k) = tmp_x(i,j,k) + dx
-          xyz(2,i,j,k) = tmp_y(i,j,k) + dy
-          xyz(3,i,j,k) = tmp_z(i,j,k) + dz
-        end do
-      end do
-    end do
-  end function unit_cartesian_mesh_cat_perturbed
-
-  pure subroutine unit_cartesian_mesh(nx,ny,nz,x,y,z)
-    use set_constants, only : zero, one
-    integer, intent(in) :: nx, ny, nz
-    real(dp), dimension(nx,ny,nz), intent(out) :: x, y, z
-
-    call meshgrid3( linspace(nx,zero,one), &
-                    linspace(ny,zero,one), &
-                    linspace(nz,zero,one), x,y,z)
-  end subroutine unit_cartesian_mesh
 
   pure function linspace(N,x1,x2) result(array)
     integer,  intent(in)   :: N
@@ -5286,32 +5224,6 @@ contains
     rec = var_rec_t( grid, n_dim, degree, n_vars, ext_fun=eval_fun )
   end subroutine setup_reconstruction
 
-  
-
-  subroutine setup_grid_and_rec_2( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec, eval_fun )
-    use grid_derived_type,    only : grid_type
-    use var_rec_derived_type, only : var_rec_t
-    use linspace_helper,      only : unit_cartesian_mesh_cat
-    use linspace_helper,      only : unit_cartesian_mesh_cat_perturbed
-    use function_holder_type, only : func_h_t
-    integer,                   intent(in)  :: n_dim, n_vars, degree
-    integer, dimension(3),     intent(in)  :: n_nodes, n_ghost
-    type(grid_type),           intent(out) :: grid
-    type(var_rec_t),           intent(out) :: rec
-    class(func_h_t), optional, intent(in)  :: eval_fun
-
-    call grid%setup(1)
-    call grid%gblock(1)%setup(n_dim,n_nodes,n_ghost)
-
-    ! grid%gblock(1)%node_coords = unit_cartesian_mesh_cat(n_nodes(1),n_nodes(2),n_nodes(3))
-    grid%gblock(1)%node_coords = unit_cartesian_mesh_cat_perturbed(n_nodes(1),n_nodes(2),n_nodes(3),0.3_dp)
-
-    call grid%gblock(1)%grid_vars%setup( grid%gblock(1) )
-
-    rec = var_rec_t( grid, n_dim, degree, n_vars, ext_fun=eval_fun )
-    
-  end subroutine setup_grid_and_rec_2
-
 end module test_problem
 
 program main
@@ -5355,8 +5267,7 @@ program main
   ! call setup_grid_generate( n_dim, n_nodes, n_ghost, grid, delta=0.3_dp, x1_map, x2_map, x3_map )
   call setup_grid( n_dim, n_nodes, n_ghost, grid, delta=0.0_dp, x2_map=geom_space_wrapper )
   call setup_reconstruction( grid, n_dim, n_vars, degree, rec, eval_fun=eval_fun )
-  ! call setup_grid_and_rec_2( n_dim, n_vars, degree, n_nodes, n_ghost, grid, rec2, eval_fun=eval_fun )
-  call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=100,soln_name='test',output_quad_order=12)
+  call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp,n_iter=1000,soln_name='test',output_quad_order=12)
   ! call rec%solve( grid,ext_fun=eval_fun,ramp=.true.,tol=1.0e-10_dp)
   write(*,*) 'Elapsed time: ', timer%toc()
   call rec%destroy()
